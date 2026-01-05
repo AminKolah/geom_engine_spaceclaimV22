@@ -16,28 +16,37 @@ def get_param(name, default_val):
 
 # Logic options
 filler_opt   = int(get_param('filler_option', 0))
-drain_opt    = int(get_param('has_drains', 1))
+drain_opt    = float(get_param('has_drains', 0))
 is_a_doublet = int(get_param('is_a_doublet', 0)) 
-is_elliptic  = int(get_param('is_elliptic', 0))
-h_mix        = get_param('mixing_factor', 0.9)
+is_elliptic  = int(get_param('is_elliptic', 1))
+h_mix        = float(get_param('mixing_factor', 0.7))
 
 # filler_mode logic
 filler_mode = "shell" if filler_opt == 1 else "fill"
 
 # Conductor and Core
-D_cond    = get_param('diam_cond', 1.0)
-C2C       = get_param('c2c', 3.0)
-D_core    = get_param('diam_core', 2.8)
+D_cond    = float(get_param('diam_cond', 1.0))
+C2C       = float(get_param('c2c', 3.0))
+D_core    = float(get_param('diam_core', 2.8))
 
 # Shield (Double-D)
-t_shield   = get_param('t_shield', 0.1)
-W_outer    = get_param('W_outer', 8.0)
-H_outer    = get_param('H_outer', 5.0)
+t_shield   = float(get_param('t_shield', 0.1))
+W_outer    = float(get_param('W_outer', 8.0))
+H_outer    = float(get_param('H_outer', 5.0))
 
 # Drains and Overwrap
-D_drain    = get_param('diam_drain', 1.0)
-t_overwrap = get_param('t_overwrap', 0.1)
-L_extrude  = get_param('length_extrude', 50.0)
+D_drain    = float(get_param('diam_drain', 1.0))
+t_overwrap = float(get_param('t_overwrap', 0.1))
+L_extrude  = float(get_param('length_extrude', 50.0))
+
+# Multilumen options
+is_a_multilumen   = int(get_param('is_a_multilumen', 0))
+multilumen_shape_opt   = int(get_param('multilumen_shape', 0))
+multilumen_shape_mode = "trapezoidal" if filler_opt == 1 else "circular"
+multilumen_wall_thickness = float(get_param('multlumen_wall_thickness',0.1))
+n_multilumen_cavity = int(get_param('n_multilumen_cavity', 9))
+
+if (filler_mode == "shell" and D_core != C2C): D_core = C2C
 
 # Derived values
 r_cond, r_core, r_drain = D_cond/2.0, D_core/2.0, D_drain/2.0
@@ -50,6 +59,7 @@ R_in = H_in / 2.0
 dx_in = (W_in - H_in) / 2.0
 R_shield = H_outer / 2.0
 dx_shield = (W_outer - H_outer) / 2.0
+
 
 # -----------------------------
 # 2. HELPER FUNCTIONS
@@ -111,15 +121,17 @@ def sketch_elliptic(W_val, H_val, h, n_ellipse=80):
     # ---- 1) Ellipse portion (|x|<=xc) using smooth Splines ----
     xs = [(-xc + (2.0 * xc) * i / float(n_ellipse)) for i in range(n_ellipse + 1)]
 
-    # TOP Spline
-    # Collect points into a List[Point2D]
+    curves = [] # Create a list to hold all the curves
+
+    # 1) TOP Spline
     pts_top = [P2(x, H * math.sqrt(max(0.0, 1.0 - (x*x)/(rx*rx)))) for x in xs]
-    # Create a single smooth curve through all points
-    SketchNurbs.CreateFrom2DPoints(False, pts_top) 
+    res_top = SketchNurbs.CreateFrom2DPoints(False, pts_top)
+    curves.extend(res_top.CreatedCurves) # Add to list
 
     # BOTTOM Spline
     pts_bot = [P2(x, -H * math.sqrt(max(0.0, 1.0 - (x*x)/(rx*rx)))) for x in reversed(xs)]
-    SketchNurbs.CreateFrom2DPoints(False, pts_bot)
+    res_bot = SketchNurbs.CreateFrom2DPoints(False, pts_bot)
+    curves.extend(res_bot.CreatedCurves) # Add to list
 
     # ---- 2) End-cap arcs ONLY (no full circles) ----
     # Right circle center at (+a, 0), where a = D - rs
@@ -138,7 +150,8 @@ def sketch_elliptic(W_val, H_val, h, n_ellipse=80):
     end_r   = P2(xr, -yr)
 
     # Right cap arc: from top -> bottom going through (D,0) (rightmost), i.e. clockwise
-    SketchArc.CreateSweepArc(P2(+a, 0.0), start_r, end_r, True)
+    res_r = SketchArc.CreateSweepArc(P2(+a, 0.0), start_r, end_r, True)
+    curves.extend(res_r.CreatedCurves)
 
     # Left circle center at (-a, 0)
     # Join points mirrored:
@@ -149,16 +162,18 @@ def sketch_elliptic(W_val, H_val, h, n_ellipse=80):
     end_l   = P2(xl, -yl)
 
     # Left cap arc: top -> bottom going through (-D,0) (leftmost), i.e. counterclockwise
-    SketchArc.CreateSweepArc(P2(-a, 0.0), start_l, end_l, False)
+    res_l = SketchArc.CreateSweepArc(P2(-a, 0.0), start_l, end_l, False)
+    curves.extend(res_l.CreatedCurves)
 
     print("Elliptic mix (arcs-only) sketched:",
           "xc=%.4f rx=%.4f rs=%.4f yc=%.4f" % (xc, rx, rs, yc))
+    return curves # IMPORTANT: Return the list of curves
 
 def sketch_profile(dx, R, W_val, H_val):
     if is_elliptic:
-        sketch_elliptic(W_val, H_val, h_mix)
+        return sketch_elliptic(W_val, H_val, h_mix)
     else:
-        sketch_doubleD(dx, R)
+        return sketch_doubleD(dx, R)
 
 def sketch_wrap_loop_with_drains(offset):
     if not is_elliptic:
@@ -249,45 +264,158 @@ def extrude_and_name(name, length_mm, pick_largest=False):
     new_body.SetName(name)
     return new_body
 
-# -----------------------------
+
+def create_ns(name, body_or_list):
+    """Creates a Named Selection in the Groups tab for ANSYS Mechanical"""
+    if isinstance(body_or_list, list):
+        items = body_or_list
+    else:
+        items = [body_or_list]
+    
+    sel = BodySelection.Create(items)
+    # Create the group and rename it
+    design_group = NamedSelection.Create(sel, Selection.Empty())
+    design_group.CreatedNamedSelection.SetName("NS_" + name)
+
+def create_ns(name, body_or_list):
+    """Creates a Named Selection Group for ANSYS Mechanical"""
+    if isinstance(body_or_list, list):
+        items = body_or_list
+    else:
+        items = [body_or_list]
+    
+    # Create selection from the list of bodies
+    sel = BodySelection.Create(items)
+    
+    # Create the named selection command result
+    result = NamedSelection.Create(sel, Selection.Empty())
+    
+    # Retrieve the IGroup object using the GetCreated method
+    # This is more robust than accessing result.CreatedGroup directly
+    created_groups = result.GetCreated[IGroup]()
+    
+    if created_groups.Count > 0:
+        new_group = created_groups[0]
+        new_group.SetName("NS_" + name)
+        print("Named Selection 'NS_{0}' created successfully.".format(name))
+    else:
+        print("Warning: Failed to create Named Selection for {0}".format(name))
+        
 # 3. BUILD GEOMETRY
 # -----------------------------
 
 # (1) Conductors
 set_sketch_plane_xy()
 sketch_circle(-dx_cond, 0, r_cond)
-extrude_and_name("conductor[1]", L_extrude)
+c1 = extrude_and_name("conductor[1]", L_extrude)
+create_ns("conductor[1]", c1)
+
 
 set_sketch_plane_xy()
 sketch_circle(dx_cond, 0, r_cond)
-extrude_and_name("conductor[2]", L_extrude)
+c2 = extrude_and_name("conductor[2]", L_extrude)
+create_ns("conductor[2]", c1)
 
 # (2) Cores (Insulation)
 if not (is_a_doublet):
-    set_sketch_plane_xy()
-    sketch_circle(-dx_cond, 0, r_core)
-    sketch_circle(-dx_cond, 0, r_cond)
-    extrude_and_name("single_core[1]", L_extrude, True)
+    if (is_a_multilumen):
+        w = multilumen_wall_thickness
+        total_gap = r_core - r_cond
+        
+        # Pitch Circle Radius (centered in the insulation)
+        rp = r_cond + (total_gap / 2.0)
+        
+        # 1. Calculate Hole Diameter (Dh) based on Angular Spacing
+        # The distance between centers along the arc must be approx (Dh + w)
+        # Chord length formula: Chord = 2 * rp * sin(pi / n)
+        # We want: Chord - Dh = w  =>  Dh = Chord - w
+        if n_multilumen_cavity > 1:
+            chord = 2.0 * rp * math.sin(math.pi / n_multilumen_cavity)
+            dh_angular = chord - w
+        else:
+            dh_angular = total_gap - 2.0 * w # Fallback for single hole
+            
+        # 2. Calculate Hole Diameter (Dh) based on Radial Spacing
+        dh_radial = total_gap - 2.0 * w
+        
+        # Final Diameter must be the smaller of the two to respect all walls
+        d_hole = min(dh_angular, dh_radial)
+        r_hole = d_hole / 2.0
 
-    set_sketch_plane_xy()
-    sketch_circle(dx_cond, 0, r_core)
-    sketch_circle(dx_cond, 0, r_cond)
-    extrude_and_name("single_core[2]", L_extrude, True)
+        def draw_mirrored_core(center_x, is_right_side):
+            set_sketch_plane_xy()
+            sketch_circle(center_x, 0, r_core)
+            sketch_circle(center_x, 0, r_cond)
+            
+            if n_multilumen_cavity > 0 and d_hole > 0:
+                for i in range(n_multilumen_cavity):
+                    # Calculate angle (offset by 90 deg or pi/n to avoid C2C axis if desired)
+                    angle = (2.0 * math.pi * i) / n_multilumen_cavity
+                    
+                    # Enforce Symmetry
+                    if not is_right_side:
+                        hx = center_x - rp * math.cos(angle)
+                    else:
+                        hx = center_x + rp * math.cos(angle)
+                    
+                    hy = rp * math.sin(angle)
+                    sketch_circle(hx, hy, r_hole)
 
+            # Build Cores
+       # draw_mirrored_core(-dx_cond, False)
+       # extrude_and_name("single_core[1]", L_extrude, True)
+
+       # draw_mirrored_core(dx_cond, True)
+       # extrude_and_name("single_core[2]", L_extrude, True)
+
+        # Function to draw the core with lumens
+        def sketch_core_with_lumens(center_x):
+            set_sketch_plane_xy()
+            sketch_circle(center_x, 0, r_core) # Outer Core Boundary
+            sketch_circle(center_x, 0, r_cond) # Inner Conductor Boundary
+            
+            # Add the lumen holes in a circular pattern
+            if n_multilumen_cavity > 0:
+                for i in range(n_multilumen_cavity):
+                    angle = (2.0 * math.pi * i) / n_multilumen_cavity
+                    hx = center_x + pitch_radius * math.cos(angle)
+                    hy = pitch_radius * math.sin(angle)
+                    sketch_circle(hx, hy, r_hole)
+
+        # Build Core 1
+        sketch_core_with_lumens(-dx_cond)
+        score1 = extrude_and_name("single_core[1]", L_extrude, True)
+        create_ns("single_core[1]", score1)
+        # Build Core 2
+        sketch_core_with_lumens(dx_cond)
+        score2 = extrude_and_name("single_core[2]", L_extrude, True)
+        create_ns("single_core[2]", score2)
+    else:
+        set_sketch_plane_xy()
+        sketch_circle(-dx_cond, 0, r_core)
+        sketch_circle(-dx_cond, 0, r_cond)
+        score1 = extrude_and_name("single_core[1]", L_extrude, True)
+        create_ns("single_core[1]", score1)
+        
+        set_sketch_plane_xy()
+        sketch_circle(dx_cond, 0, r_core)
+        sketch_circle(dx_cond, 0, r_cond)
+        score2 = extrude_and_name("single_core[2]", L_extrude, True)
+        create_ns("single_core[2]", score2)
 # (3) Filler / Doublet
 set_sketch_plane_xy()
-if is_a_doublet and filler_opt == 1:
+if is_a_doublet:
     sketch_profile(dx_in, R_in, W_in, H_in)
     sketch_circle(-dx_cond, 0, r_cond)
     sketch_circle(dx_cond, 0, r_cond)
-    extrude_and_name("Second_Extrusion", L_extrude, True)
-
+    second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
+    create_ns("Second_Extrusion", second_extrusion)
 elif filler_mode == "fill":
     sketch_profile(dx_in, R_in, W_in, H_in)
     sketch_circle(-dx_cond, 0, r_core)
     sketch_circle(dx_cond, 0, r_core)
-    extrude_and_name("Second_Extrusion", L_extrude, True)
-
+    second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
+    create_ns("Second_Extrusion", second_extrusion)
 elif filler_mode == "shell":
     t_filler_shell = (dx_in + R_in) - (dx_cond + r_core)
     sketch_profile(dx_in, R_in, W_in, H_in)
@@ -301,22 +429,26 @@ elif filler_mode == "shell":
     
     sketch_circle(-dx_cond, 0, r_core)
     sketch_circle(dx_cond, 0, r_core)
-    extrude_and_name("Second_Extrusion", L_extrude, True)
+    second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
+    create_ns("Second_Extrusion", second_extrusion)
 
 # (4) Shield
 set_sketch_plane_xy()
 sketch_profile(dx_shield, R_shield, W_outer, H_outer)
-extrude_and_name("Shield", L_extrude, True)
+shield = extrude_and_name("Shield", L_extrude, True)
+create_ns("Shield", shield)
 
 # (5) Drains
 x_drain = dx_shield + R_shield + r_drain
 if drain_opt:
     set_sketch_plane_xy()
     sketch_circle(-x_drain, 0, r_drain)
-    extrude_and_name("drain[1]", L_extrude)
+    drain1 = extrude_and_name("drain[1]", L_extrude)
+    create_ns("drain[1]", drain1)
     set_sketch_plane_xy()
     sketch_circle(x_drain, 0, r_drain)
-    extrude_and_name("drain[2]", L_extrude)
+    drain2 = extrude_and_name("drain[2]", L_extrude)
+    create_ns("drain[2]", drain2)
 
 # (6) Overwrap
 if drain_opt:
@@ -325,18 +457,50 @@ if drain_opt:
     set_sketch_plane_xy()
     sketch_wrap_loop_with_drains(0)
     sketch_wrap_loop_with_drains(t_overwrap)
-    extrude_and_name("Overwrap", L_extrude, True)
+    overwrap = extrude_and_name("Overwrap", L_extrude, True)
+    create_ns("Overwrap", overwrap)
 else:
+    # 1. Create the Outer Solid for Overwrap
     set_sketch_plane_xy()
-    # Fixed argument mismatch here
     sketch_profile(dx_shield, R_shield + t_overwrap, W_outer + 2*t_overwrap, H_outer + 2*t_overwrap)
-    extrude_and_name("Overwrap", L_extrude, True)
+    overwrap = extrude_and_name("Overwrap", L_extrude, True)
+    create_ns("Overwrap", overwrap)
 
 # -----------------------------
-# 4. CLEANUP
+# 4. CLEANUP (Simple Name-based)
 # -----------------------------
-#surfaces = DataModel.GetObjectsByName("Surface")
-#if surfaces.Count > 0: Selection.Create(surfaces).Delete()
-#Selection.Create(GetRootPart().GetAllCurves()).Delete()
+from SpaceClaim.Api.V22 import *
+from SpaceClaim.Api.V22.Modeler import *
+
+def simple_cleanup_surfaces():
+    root = GetRootPart()
+    to_delete = []
+
+    for body in list(root.Bodies):
+        try:
+            # Purple items = surface bodies (not solids)
+            if (not body.IsSolid) and body.Name == "Surface":
+                to_delete.append(body)
+        except:
+            pass
+
+    if to_delete:
+        Delete.Execute(Selection.Create(to_delete))
+        print("Deleted {} surface bodies named 'Surface'.".format(len(to_delete)))
+    else:
+        print("No surface bodies found.")
+
+# Call at very end
+simple_cleanup_surfaces()
 
 print("Assembly Created. Doublet: " + str(bool(is_a_doublet)) + " Elliptic: " + str(bool(is_elliptic)))
+
+
+
+
+
+# Open File
+DocumentOpen.Execute(r"C:\Users\kolahdouze\Projects\BulkCable\geom_engine_spaceclaimV22\GeomEng_CableParameters.scdoc", FileSettings1)
+# EndBlock
+
+
