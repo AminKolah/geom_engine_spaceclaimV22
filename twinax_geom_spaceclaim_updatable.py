@@ -807,18 +807,23 @@ if not (is_a_doublet):
 
             # ---- Add lumen holes around the core ----
             if n_multilumen_cavity > 0:
+                is_right = (center_x > 0)
+
                 for i in range(n_multilumen_cavity):
                     angle = (2.0 * math.pi * i) / n_multilumen_cavity
 
-                    # center of each lumen relative to each core's center
-                    hx = center_x + rp * math.cos(angle)
-                    hy = 0.0      + rp * math.sin(angle)
+                    # mirror the angular position for the right core
+                    angle_pos = (math.pi - angle) if is_right else angle
+
+                    hx = center_x + rp * math.cos(angle_pos)
+                    hy = 0.0      + rp * math.sin(angle_pos)
 
                     if shape_mode == "circular":
                         sketch_circle(hx, hy, r_hole)
                     else:
-                        # Orient trapezoid radially (long axis points outward from core center)
-                        sketch_trapezoid(hx, hy, angle, h_trap, w_inner, w_outer)
+                        # orient trapezoid radially; mirror orientation too
+                        angle_orient = angle_pos
+                        sketch_trapezoid(hx, hy, angle_orient, h_trap, w_inner, w_outer)
 
 
             # if n_multilumen_cavity > 0:
