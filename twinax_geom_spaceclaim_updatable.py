@@ -1,9 +1,5 @@
 # Python Script, API Version = V22
- # Python Script, API Version = V22
 
-# Python Script, API Version = V22
-
-# Python Script for SpaceClaim V22
 
 import math
 
@@ -756,19 +752,86 @@ if not (is_a_doublet):
 
             
 
-            # Add the lumen holes in a circular pattern
+            # # Add the lumen holes in a circular pattern
+            # ---- Septum thickness (your existing parameter) ----
+            t_septum = multilumen_wall_thickness
 
+            total_gap = r_core - r_cond
+            if total_gap <= 2.0 * t_septum:
+                raise Exception("Not enough radial room: (r_core-r_cond) must be > 2*t_septum.")
+
+            # Pitch radius (center of lumen ring)
+            rp = r_cond + 0.5 * total_gap
+
+            # Neighbor chord spacing at rp
+            if n_multilumen_cavity > 1:
+                chord = 2.0 * rp * math.sin(math.pi / n_multilumen_cavity)
+            else:
+                chord = 1e9  # doesn't matter for single lumen
+
+            # Max allowed circumferential size to keep septum >= t_septum between lumens
+            w_max = chord - t_septum
+            if w_max <= 0:
+                raise Exception("Not enough circumferential room: chord must be > t_septum.")
+
+            # Max allowed radial size to keep septum >= t_septum near conductor/core
+            h_max = total_gap - 2.0 * t_septum
+            if h_max <= 0:
+                raise Exception("Not enough radial room: total_gap must be > 2*t_septum.")
+
+            # --- Choose lumen dimensions ---
+            shape_mode = ("trapezoidal" if multilumen_shape_opt == 1 else "circular")
+
+            # Optional trapezoid “taper” control (0=rectangle, 0.6=more trapezoid)
+            trap_taper = float(get_param("trap_taper", 0.35))
+            trap_taper = max(0.0, min(0.9, trap_taper))  # clamp
+
+            # For a fair comparison with circular holes, we set an equivalent "size"
+            # using w_max and h_max.
+            if shape_mode == "circular":
+                # hole diameter limited by both directions
+                d_hole = min(w_max, h_max)
+                r_hole = 0.5 * d_hole
+            else:
+                # trapezoid: height close to h_max, widths close to w_max
+                h_trap = 0.95 * h_max
+
+                # widths taper: inner narrower, outer wider (or vice versa)
+                w_mid = 0.90 * w_max
+                w_inner = w_mid * (1.0 - trap_taper)
+                w_outer = w_mid * (1.0 + trap_taper)
+
+                # safety
+                if w_inner <= 0 or w_outer <= 0:
+                    raise Exception("Bad trapezoid widths; decrease trap_taper or increase spacing.")
+
+            # ---- Add lumen holes around the core ----
             if n_multilumen_cavity > 0:
-
                 for i in range(n_multilumen_cavity):
-
                     angle = (2.0 * math.pi * i) / n_multilumen_cavity
 
-                    hx = center_x + pitch_radius * math.cos(angle)
+                    # center of each lumen relative to each core's center
+                    hx = center_x + rp * math.cos(angle)
+                    hy = 0.0      + rp * math.sin(angle)
 
-                    hy = pitch_radius * math.sin(angle)
+                    if shape_mode == "circular":
+                        sketch_circle(hx, hy, r_hole)
+                    else:
+                        # Orient trapezoid radially (long axis points outward from core center)
+                        sketch_trapezoid(hx, hy, angle, h_trap, w_inner, w_outer)
 
-                    sketch_circle(hx, hy, r_hole)
+
+            # if n_multilumen_cavity > 0:
+
+            #     for i in range(n_multilumen_cavity):
+
+            #         angle = (2.0 * math.pi * i) / n_multilumen_cavity
+
+            #         hx = center_x + pitch_radius * math.cos(angle)
+
+            #         hy = pitch_radius * math.sin(angle)
+
+            #         sketch_circle(hx, hy, r_hole)
 
 
         # Build Core 1
