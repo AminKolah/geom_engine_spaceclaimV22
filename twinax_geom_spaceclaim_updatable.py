@@ -98,6 +98,9 @@ multilumen_wall_thickness = float(Parameters.multlumen_wall_thickness) if hasatt
 
 n_multilumen_cavity       = int(Parameters.n_multilumen_cavity) if hasattr(Parameters, 'n_multilumen_cavity') else 9
 
+# multilumen shape mode logic
+
+multilumen_shape_mode = "trapezoidal" if multilumen_shape_opt == 1 else "circular"
 
 if (filler_mode == "shell" and D_core != C2C): D_core = C2C
 
@@ -313,6 +316,48 @@ def sketch_elliptic(W_val, H_val, h, n_ellipse=80):
           "xc=%.4f rx=%.4f rs=%.4f yc=%.4f" % (xc, rx, rs, yc))
 
     return curves # IMPORTANT: Return the list of curves
+
+def sketch_trapezoid(cx, cy, angle_rad, h, w_inner, w_outer):
+    """
+    Draw a trapezoid lumen centered at (cx,cy), whose symmetry axis is along angle_rad.
+    "Inner" side is toward -radial direction, "Outer" toward +radial direction.
+      - height = h (radial direction)
+      - w_inner = width at inner side
+      - w_outer = width at outer side
+    """
+    ca = math.cos(angle_rad)
+    sa = math.sin(angle_rad)
+
+    # Local axes: radial u (outward), tangential v (CCW)
+    ux, uy = ca, sa
+    vx, vy = -sa, ca
+
+    # Half-sizes
+    hi = 0.5 * h
+    wi = 0.5 * w_inner
+    wo = 0.5 * w_outer
+
+    # Four corners in (u,v) local coords:
+    # inner face at u = -hi, outer face at u = +hi
+    # inner width = w_inner, outer width = w_outer
+    local = [
+        (-hi, +wi),  # inner-top
+        (+hi, +wo),  # outer-top
+        (+hi, -wo),  # outer-bot
+        (-hi, -wi),  # inner-bot
+    ]
+
+    pts = []
+    for (u, v) in local:
+        x = cx + u*ux + v*vx
+        y = cy + u*uy + v*vy
+        pts.append(P2(x, y))
+
+    # Connect
+    SketchLine.Create(pts[0], pts[1])
+    SketchLine.Create(pts[1], pts[2])
+    SketchLine.Create(pts[2], pts[3])
+    SketchLine.Create(pts[3], pts[0])
 
 
 def sketch_profile(dx, R, W_val, H_val):
