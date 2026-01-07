@@ -68,7 +68,7 @@ h_mix        = float(Parameters.mixing_factor) if hasattr(Parameters, 'mixing_fa
 
 is_a_multilumen           = int(Parameters.is_a_multilumen) if hasattr(Parameters, 'is_a_multilumen') else 0
 multilumen_shape_opt      = int(Parameters.multilumen_shape) if hasattr(Parameters, 'multilumen_shape') else 0
-multilumen_wall_thickness = float(Parameters.multlumen_wall_thickness) if hasattr(Parameters, 'multlumen_wall_thickness') else 0.1
+multilumen_wall_thickness = float(Parameters.multilumen_wall_thickness) if hasattr(Parameters, 'multilumen_wall_thickness') else 0.1
 n_multilumen_cavity       = int(Parameters.n_multilumen_cavity) if hasattr(Parameters, 'n_multilumen_cavity') else 9
 
 # multilumen shape mode logic
