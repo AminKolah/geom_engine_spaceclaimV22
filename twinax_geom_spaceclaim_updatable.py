@@ -9,7 +9,6 @@ from SpaceClaim.Api.V22.Geometry import *
 
 from SpaceClaim.Api.V22.Modeler import *
 
-
 ClearAll()
 
 
@@ -702,28 +701,133 @@ else:
 # 4. CLEANUP (Simple Name-based)
 
 # ----------------------------
-
-def simple_cleanup_surfaces():
-
+def cleanup_sheet_bodies(delete_all_non_solids=True, name_filter=None, verbose=True):
     root = GetRootPart()
-    to_delete = []
+    sheet_bodies = []
 
-
-    for body in list(root.Bodies):
+    for b in list(root.Bodies):
         try:
-            # Purple items = surface bodies (not solids)
-            if (not body.IsSolid) and body.Name == "Surface":
-                to_delete.append(body)
-        except:
-            pass
+            is_solid = getattr(b, "IsSolid", None)
+            # Some versions expose IsSheetBody; use it if available
+            is_sheet = getattr(b, "IsSheetBody", None)
+
+            if is_sheet is None:
+                # fallback: treat "not solid" as sheet/surface
+                is_sheet = (is_solid is False)
+
+            if delete_all_non_solids:
+                candidate = (is_sheet is True) or (is_solid is False)
+            else:
+                candidate = (is_solid is False)
+
+            if candidate:
+                if (name_filter is None) or (b.Name == name_filter):
+                    sheet_bodies.append(b)
+
+                    if verbose:
+                        print("FOUND non-solid body:",
+                              "Name='{}'".format(b.Name),
+                              "IsSolid={}".format(is_solid),
+                              "IsSheetBody={}".format(getattr(b, "IsSheetBody", "NA")))
+
+        except Exception as e:
+            if verbose:
+                print("Skipping body due to exception:", e)
+
+    if not sheet_bodies:
+        if verbose:
+            print("No sheet/surface bodies found to delete.")
+        return
+
+    # IMPORTANT: Delete expects a proper selection (BodySelection works reliably)
+    sel = BodySelection.Create(sheet_bodies)
+    Delete.Execute(sel)
+
+    if verbose:
+        print("Deleted {} sheet/surface bodies.".format(len(sheet_bodies)))
 
 
-    if to_delete:
-        Delete.Execute(Selection.Create(to_delete))
-        print("Deleted {} surface bodies named 'Surface'.".format(len(to_delete))) 
+# Call at very end:
+cleanup_sheet_bodies(delete_all_non_solids=True, name_filter=None, verbose=True)
 
+# -----------------------------
+# ORGANIZING: Move Cable to Component
+# -----------------------------
 
-# Call at very end
-simple_cleanup_surfaces()
+def move_all_root_bodies_to_component(comp_name):
 
-print("Assembly Created.")
+    # 1. Get all bodies currently in the Root
+    # We convert to a Python list immediately so we don't iterate over a changing collection
+    root_bodies = list(GetRootPart().Bodies)
+    
+    if not root_bodies:
+        print("No bodies in Root to move.")
+        return
+    # 2. Create the new Component inside the Root
+    # This creates a new internal component
+     # 1. Get the current document
+    doc = Window.ActiveWindow.Document
+
+    # 2. Create the Part Definition (Fixing your error)
+    # This creates the "blueprint" for the part, but doesn't show it in the tree yet
+    new_part_definition = Part.Create(doc, comp_name)
+
+    # 3. Create the Component (Instance)
+    # This actually adds it to the assembly under the Root Part
+    new_comp = Component.Create(GetRootPart(), new_part_definition)
+    
+    # 3. Move the bodies
+    # ComponentHelper.MoveBodiesToComponent takes (BodySelection, TargetComponent)
+    sel = BodySelection.Create(root_bodies)
+    ComponentHelper.MoveBodiesToComponent(sel, new_comp)
+    
+    print("Moved " + str(len(root_bodies)) + " bodies to component: " + comp_name)
+
+# --- EXECUTE THE MOVE ---
+move_all_root_bodies_to_component("cable_bodies")
+# ------------------------------------------------------------
+# ============================================================
+# 7) RIGID 3-POINT BENDING: LOADING NOSE (Fixed)
+# ============================================================
+
+def move_body_to_component(body, target_component):
+    """
+    Moves a body to a component and RETURNS THE NEW BODY.
+    Crucial: The original 'body' reference is invalid after the move.
+    """
+    sel = Selection.Create(body)
+    ComponentHelper.MoveBodiesToComponent(sel, target_component)
+    
+    # The body is now the last one in the target component's list
+    # We must return this NEW reference.
+    return target_component.Content.Bodies[-1]
+
+def create_loading_nose_in_rigid_component():
+    r = Nose_Diam / 2.0
+
+    # ... (Geometry Math is same) ...
+    cable_top_y = 0.5 * (H_outer + 2.0 * t_overwrap)
+    y_center = cable_top_y + Initial_Gap + r
+    z_center = 0.5 * L_extrude
+
+    # ... (Sketch & Extrude is same) ...
+    set_sketch_plane_yz_at_x(-0.5 * Nose_Length)
+    sketch_circle(y_center, z_center, r)
+    
+    # This 'nose' is temporary (lives in Root)
+    temp_nose = extrude_last_profile_along_x("Rig_Loading_Nose", Nose_Length)
+
+    # ... (Organize) ...
+    rigid_comp = get_or_create_component("RigidParts_3Point_Bending")
+    
+    # FIX: Update 'nose' variable to the new body inside the component
+    final_nose = move_body_to_component(temp_nose, rigid_comp)
+
+    # ... (Named Selection) ...
+    # Now we use 'final_nose', which is a valid reference
+    create_ns("Rig_Loading_Nose", final_nose)
+
+    return final_nose
+
+# Execute
+nose_body = create_loading_nose_in_rigid_component()
