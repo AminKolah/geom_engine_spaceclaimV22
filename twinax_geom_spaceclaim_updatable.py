@@ -789,7 +789,8 @@ move_all_root_bodies_to_component("cable_bodies")
 # ============================================================
 # 7) RIGID 3-POINT BENDING: LOADING NOSE (Fixed)
 # ============================================================
-
+Nose_Diam = get_param("Nose_Diam", 2 * H_outer)
+Nose_Length = get_param("Nose_Length", 4 * H_outer)
 def move_body_to_component(body, target_component):
     """
     Moves a body to a component and RETURNS THE NEW BODY.
@@ -831,3 +832,55 @@ def create_loading_nose_in_rigid_component():
 
 # Execute
 nose_body = create_loading_nose_in_rigid_component()
+
+# ============================================================
+# 8) RIGID 3-POINT BENDING: SUPPORTS (Left & Right)
+# ============================================================
+
+# Parameters for Supports
+Support_Diam = get_param("Support_Diam", H_outer)
+Support_Span = get_param("Support_Span", 2 * H_outer) # Distance between supports
+# Re-using Initial_Gap from Step 7, or you can define a new one
+Support_Gap  = get_param("Support_Gap", 0.5) 
+
+def create_supports_in_rigid_component():
+    r = Support_Diam / 2.0
+    
+    # ... (Geometry calculations remain the same) ...
+    cable_bot_y = -0.5 * (H_outer + 2.0 * t_overwrap)
+    y_center = cable_bot_y - Support_Gap - r
+    z_mid = 0.5 * L_extrude
+    z_left  = z_mid - (0.5 * Support_Span)
+    z_right = z_mid + (0.5 * Support_Span)
+    
+    rigid_comp = get_or_create_component("RigidParts_3Point_Bending")
+    
+    created_supports = []
+    
+    definitions = [
+        ("Rig_Support_Left",  z_left),
+        ("Rig_Support_Right", z_right)
+    ]
+    
+    for name, z_pos in definitions:
+        # FIX: Set the sketch plane INSIDE the loop.
+        # This forces SpaceClaim back into Sketch Mode for every new support.
+        set_sketch_plane_yz_at_x(-0.5 * Nose_Length) 
+        
+        # 1. Sketch
+        sketch_circle(y_center, z_pos, r)
+        
+        # 2. Extrude (This switches us to 3D mode)
+        temp_body = extrude_last_profile_along_x(name, Nose_Length)
+        
+        # 3. Move & Update Reference
+        final_body = move_body_to_component(temp_body, rigid_comp)
+        
+        # 4. Name Selection
+        create_ns(name, final_body)
+        
+        created_supports.append(final_body)
+
+    return created_supports
+# Execute
+supports = create_supports_in_rigid_component()
