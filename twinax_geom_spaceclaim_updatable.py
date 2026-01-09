@@ -787,11 +787,138 @@ def move_all_root_bodies_to_component(comp_name):
 move_all_root_bodies_to_component("cable_bodies")
 # ------------------------------------------------------------
 # ============================================================
-# 7) RIGID 3-POINT BENDING: LOADING NOSE (Fixed)
+# 7) RIGID 3-POINT BENDING: LOADING NOSE  +  TWO DOUBLE-D SUPPORTS
+#   - Cable axis is Z (same as your extrusions)
+#   - U/pocket profiles sketched in XY, extruded along Z
+#   - Rigid bodies moved into component: RigidParts_3Point_Bending
+#   - Supports located at 20% and 80% of L_extrude
 # ============================================================
-Nose_Diam = get_param("Nose_Diam", 2 * H_outer)
-Nose_Length = get_param("Nose_Length", 4 * H_outer)
-def move_body_to_component(body, target_component):
+
+# -----------------------------
+# Parameters (derived defaults)
+# -----------------------------
+Initial_Gap  = get_param("Initial_Gap", 0.05 * (H_outer + 2.0*t_overwrap))  # small gap above cable
+Nose_Diam    = get_param("Nose_Diam", 2.0 * (H_outer + 2.0*t_overwrap))     # reasonable first pass
+Nose_LengthX = get_param("Nose_LengthX", 4.0 * (H_outer + 2.0*t_overwrap))  # cylinder axis is X (extrude in X)
+
+# -----------------------------
+# Helpers (minimal + stable)
+# -----------------------------
+def set_sketch_plane_yz_at_x(x0):
+    frame = Frame.Create(
+        Point.Create(MM(x0), MM(0), MM(0)),
+        Direction.DirY,
+        Direction.DirZ
+    )
+    plane = Plane.Create(frame)
+    ViewHelper.SetSketchPlane(plane)
+
+def set_sketch_plane_xy_at_z(z0):
+    frame = Frame.Create(
+        Point.Create(MM(0), MM(0), MM(z0)),
+        Direction.DirX,
+        Direction.DirY
+    )
+    plane = Plane.Create(frame)
+    ViewHelper.SetSketchPlane(plane)
+
+def get_or_create_component(name):
+    root = GetRootPart()
+    # Find existing
+    for c in list(root.Components):
+        try:
+            if c.GetName() == name:
+                return c
+        except:
+            if getattr(c, "Name", "") == name:
+                return c
+
+    # Create via Part blueprint + Component instance (your working style)
+    doc = Window.ActiveWindow.Document
+    part_def = Part.Create(doc, name)
+    comp = Component.Create(root, part_def)
+    return comp
+
+def move_body_to_component_and_refetch(body, target_component, final_name):
+    """
+    Moves 'body' into component and returns a stable reference by refetching via temp name.
+    This avoids 'Bodies[-1]' instability and prevents ping-pong / regen weirdness.
+    """
+    tmp_name = final_name + "__TEMP__"
+    body.SetName(tmp_name)
+
+    ComponentHelper.MoveBodiesToComponent(Selection.Create(body), target_component)
+
+    for b in list(target_component.Content.Bodies):
+        try:
+            if b.GetName() == tmp_name:
+                b.SetName(final_name)
+                return b
+        except:
+            if getattr(b, "Name", "") == tmp_name:
+                b.SetName(final_name)
+                return b
+
+    raise Exception("Moved body but could not refetch '%s' in target component." % final_name)
+
+def extrude_largest_face_along_x(name, length_mm):
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    faces = list(temp_body.Faces)
+    if not faces:
+        raise Exception("No faces found to extrude for %s (sketch not closed?)" % name)
+    face = max(faces, key=lambda f: f.Area)
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirX, MM(length_mm), options)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude created no bodies for %s" % name)
+
+    body = created[0]
+    body.SetName(name)
+    return body
+
+def extrude_largest_face_along_z(name, length_mm):
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    faces = list(temp_body.Faces)
+    if not faces:
+        raise Exception("No faces found to extrude for %s (sketch not closed?)" % name)
+    face = max(faces, key=lambda f: f.Area)
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude created no bodies for %s" % name)
+
+    body = created[0]
+    body.SetName(name)
+    return body
+
+def sketch_rectangle_xy(xmin, xmax, ymin, ymax):
+    SketchLine.Create(P2(xmin, ymin), P2(xmax, ymin))
+    SketchLine.Create(P2(xmax, ymin), P2(xmax, ymax))
+    SketchLine.Create(P2(xmax, ymax), P2(xmin, ymax))
+    SketchLine.Create(P2(xmin, ymax), P2(xmin, ymin))
+
+def sketch_doubleD_shifted(x0, y0, dx, R):
+    # right arc
+    SketchArc.CreateSweepArc(P2(x0 + dx, y0), P2(x0 + dx, y0 + R), P2(x0 + dx, y0 - R), True)
+    # left arc
+    SketchArc.CreateSweepArc(P2(x0 - dx, y0), P2(x0 - dx, y0 + R), P2(x0 - dx, y0 - R), False)
+    # bridges
+    SketchLine.Create(P2(x0 - dx, y0 + R), P2(x0 + dx, y0 + R))
+    SketchLine.Create(P2(x0 - dx, y0 - R), P2(x0 + dx, y0 - R))
+
+# ============================================================
+# 7A) Loading Nose (YZ circle -> X extrude, centered by construction)
+#def move_body_to_component(body, target_component):
     """
     Moves a body to a component and RETURNS THE NEW BODY.
     Crucial: The original 'body' reference is invalid after the move.
@@ -802,6 +929,20 @@ def move_body_to_component(body, target_component):
     # The body is now the last one in the target component's list
     # We must return this NEW reference.
     return target_component.Content.Bodies[-1]
+
+def extrude_last_profile_along_x(name, length_mm, pick_largest=True, dir_sign=+1):
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    face = max(temp_body.Faces, key=lambda f: f.Area) if pick_largest else temp_body.Faces[0]
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+
+    dirx = Direction.DirX if dir_sign > 0 else Direction.DirX.Negate()
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), dirx, MM(length_mm), options)
+    new_body = res.CreatedBodies[0]
+    new_body.SetName(name)
+    return new_body
 
 def create_loading_nose_in_rigid_component():
     r = Nose_Diam / 2.0
