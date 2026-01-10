@@ -799,7 +799,7 @@ move_all_root_bodies_to_component("cable_bodies")
 # -----------------------------
 Initial_Gap  = get_param("Initial_Gap", 0.05 * (H_outer + 2.0*t_overwrap))  # small gap above cable
 Nose_Diam    = get_param("Nose_Diam", 2.0 * (H_outer + 2.0*t_overwrap))     # reasonable first pass
-Nose_LengthX = get_param("Nose_LengthX", 4.0 * (H_outer + 2.0*t_overwrap))  # cylinder axis is X (extrude in X)
+Nose_Length = get_param("Nose_Length", 4.0 * (H_outer + 2.0*t_overwrap))  # cylinder axis is X (extrude in X)
 
 # -----------------------------
 # Helpers (minimal + stable)
@@ -918,7 +918,7 @@ def sketch_doubleD_shifted(x0, y0, dx, R):
 
 # ============================================================
 # 7A) Loading Nose (YZ circle -> X extrude, centered by construction)
-#def move_body_to_component(body, target_component):
+def move_body_to_component(body, target_component):
     """
     Moves a body to a component and RETURNS THE NEW BODY.
     Crucial: The original 'body' reference is invalid after the move.
@@ -975,53 +975,559 @@ def create_loading_nose_in_rigid_component():
 nose_body = create_loading_nose_in_rigid_component()
 
 # ============================================================
-# 8) RIGID 3-POINT BENDING: SUPPORTS (Left & Right)
+# 7F) RIGID 3-POINT BENDING: TWO SUPPORTS WITH DOUBLE-D POCKET
+#   - Pocket follows OUTER OVERWRAP shape (double-D envelope)
+#   - Sketch in XY, extrude in Z (cable axis)
+#   - Supports at 20% and 80% of L_extrude
+#   - No boolean needed (pocket from sketch loops)
+# ============================================================
+def move_body_to_component_and_refetch(body, target_component, final_name):
+    """
+    Move body into component and refetch by name (stable).
+    Avoids relying on 'Bodies[-1]' which can be unstable.
+    """
+    # Ensure unique temp name before move
+    body.SetName(final_name + "__TEMP__")
+
+    sel = Selection.Create(body)
+    ComponentHelper.MoveBodiesToComponent(sel, target_component)
+
+    # Refetch by name inside the target component
+    for b in list(target_component.Content.Bodies):
+        try:
+            if b.GetName() == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+        except:
+            if getattr(b, "Name", "") == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+
+    raise Exception("Moved body but could not refetch '%s' in target component." % final_name)
+
+def set_sketch_plane_xy_at_z(z0):
+    frame = Frame.Create(
+        Point.Create(MM(0), MM(0), MM(z0)),
+        Direction.DirX,
+        Direction.DirY
+    )
+    plane = Plane.Create(frame)
+    ViewHelper.SetSketchPlane(plane)
+
+def sketch_rectangle_xy(xmin, xmax, ymin, ymax):
+    SketchLine.Create(P2(xmin, ymin), P2(xmax, ymin))
+    SketchLine.Create(P2(xmax, ymin), P2(xmax, ymax))
+    SketchLine.Create(P2(xmax, ymax), P2(xmin, ymax))
+    SketchLine.Create(P2(xmin, ymax), P2(xmin, ymin))
+
+def sketch_doubleD_shifted(x0, y0, dx, R):
+    """
+    Double-D loop shifted by (x0,y0) in XY plane.
+    (Same topology as your sketch_doubleD, but with offsets.)
+    """
+    # Right arc (center at +dx)
+    SketchArc.CreateSweepArc(
+        P2(x0 + dx, y0),
+        P2(x0 + dx, y0 + R),
+        P2(x0 + dx, y0 - R),
+        True
+    )
+
+    # Left arc (center at -dx)
+    SketchArc.CreateSweepArc(
+        P2(x0 - dx, y0),
+        P2(x0 - dx, y0 + R),
+        P2(x0 - dx, y0 - R),
+        False
+    )
+
+    # Top and bottom bridges
+    SketchLine.Create(P2(x0 - dx, y0 + R), P2(x0 + dx, y0 + R))
+    SketchLine.Create(P2(x0 - dx, y0 - R), P2(x0 + dx, y0 - R))
+
+def extrude_largest_face_along_z(name, length_mm):
+    solidify_sketch()
+
+    # The "temp sketch body" is usually the last body created
+    temp_body = GetRootPart().Bodies[-1]
+    faces = list(temp_body.Faces)
+    if not faces:
+        raise Exception("No faces found to extrude for %s (sketch not closed?)" % name)
+
+    # Pick largest face (for rectangle-minus-pocket, the largest should be the support region)
+    face = max(faces, key=lambda f: f.Area)
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude created no bodies for %s" % name)
+
+    body = created[0]
+    body.SetName(name)
+    return body
+
+def move_body_to_component_and_refetch(body, target_component, final_name):
+    """
+    Move body into component and refetch by name (stable).
+    Avoids relying on 'Bodies[-1]' which can be unstable.
+    """
+    # Ensure unique temp name before move
+    body.SetName(final_name + "__TEMP__")
+
+    sel = Selection.Create(body)
+    ComponentHelper.MoveBodiesToComponent(sel, target_component)
+
+    # Refetch by name inside the target component
+    for b in list(target_component.Content.Bodies):
+        try:
+            if b.GetName() == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+        except:
+            if getattr(b, "Name", "") == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+
+    raise Exception("Moved body but could not refetch '%s' in target component." % final_name)
+
+
+def create_support_with_doubleD_pocket(name, z_center):
+    # Outer overwrap envelope dims (double-D assumption)
+    W_ow = W_outer + 2.0*t_overwrap
+    H_ow = H_outer + 2.0*t_overwrap
+
+    R_ow = 0.5 * H_ow
+    dx_ow = 0.5 * (W_ow - H_ow)
+
+    # Small clearance so cable isn't intersecting fixture
+    clearance = 0.03 * min(W_ow, H_ow)
+    R_pocket = R_ow + clearance
+    dx_pocket = dx_ow
+
+    # Support thickness along Z: derived + clamped
+    t_support = 0.20 * L_extrude
+    t_support = max(1.2*H_ow, min(t_support, 3.0*H_ow))
+
+    # Block padding around envelope
+    pad_x   = 0.35 * W_ow
+    pad_y_up = 0.15 * H_ow
+    pad_y_dn = 0.55 * H_ow
+
+    # Pocket sits slightly below centerline so cable "rests"
+    x0 = 0.0
+    y0 = 0.10 * H_ow
+
+    # Place by construction: start sketch at z0 so extrusion spans [z0, z0+t_support]
+    z0 = z_center - 0.5*t_support
+    set_sketch_plane_xy_at_z(z0)
+
+    # Outer block rectangle
+    xmin = -(0.5*W_ow + pad_x)
+    xmax = +(0.5*W_ow + pad_x)
+    ymin = -(0.5*H_ow + pad_y_dn)
+    ymax = +(0.5*H_ow + pad_y_up)
+    sketch_rectangle_xy(xmin, xmax, ymin, ymax)
+
+    # Inner pocket loop
+    sketch_doubleD_shifted(x0, y0, dx_pocket, R_pocket)
+
+    temp_support = extrude_largest_face_along_z(name, t_support)
+    return temp_support
+
+# ============================================================
+# 7B) Two Supports with Double-D Pocket (XY sketch -> Z extrude)
+# ============================================================
+def _body_name(b):
+    try:
+        return b.GetName()
+    except:
+        return getattr(b, "Name", "")
+
+def find_bodies_by_prefix_anywhere(prefixes):
+    """Return list of bodies in root + immediate components whose name starts with any prefix."""
+    root = GetRootPart()
+    out = []
+
+    # root bodies
+    for b in list(root.Bodies):
+        n = _body_name(b)
+        if any(n.startswith(p) for p in prefixes):
+            out.append(b)
+
+    # component bodies (1 level deep; enough for your Cable_Bodies / RigidParts_3Point_Bending)
+    for comp in list(root.Components):
+        try:
+            for b in list(comp.Content.Bodies):
+                n = _body_name(b)
+                if any(n.startswith(p) for p in prefixes):
+                    out.append(b)
+        except:
+            pass
+
+    return out
+
+def delete_bodies(bodies):
+    if bodies:
+        Delete.Execute(Selection.Create(bodies))
+def _body_name(b):
+    try:
+        return b.GetName()
+    except:
+        return getattr(b, "Name", "")
+
+def find_body_anywhere_by_name(name):
+    root = GetRootPart()
+
+    # root bodies
+    for b in list(root.Bodies):
+        if _body_name(b) == name:
+            return b, None  # None means root
+
+    # one level components (covers your Cable_Bodies / RigidParts_3Point_Bending)
+    for comp in list(root.Components):
+        try:
+            for b in list(comp.Content.Bodies):
+                if _body_name(b) == name:
+                    return b, comp
+        except:
+            pass
+
+    return None, None
+
+def move_body_to_component_once(body, current_comp, target_comp, final_name):
+    # already in the right place → do nothing
+    if current_comp is target_comp:
+        return body
+
+    # if already named correctly, keep it; otherwise set a temp name for refetch
+    tmp_name = final_name + "__TEMP__"
+    body.SetName(tmp_name)
+
+    ComponentHelper.MoveBodiesToComponent(Selection.Create(body), target_comp)
+
+    # refetch moved body by temp name (small loop, only happens once)
+    for b in list(target_comp.Content.Bodies):
+        if _body_name(b) == tmp_name:
+            b.SetName(final_name)
+            return b
+
+    # fallback: try final_name match
+    for b in list(target_comp.Content.Bodies):
+        if _body_name(b) == final_name:
+            return b
+
+    raise Exception("Move succeeded but could not refetch moved body: " + final_name)
+
+def create_support_with_doubleD_pocket(name, z_center):
+    # Outer overwrap envelope dims (double-D assumption)
+    W_ow = W_outer + 2.0*t_overwrap
+    H_ow = H_outer + 2.0*t_overwrap
+
+    R_ow = 0.5 * H_ow
+    dx_ow = 0.5 * (W_ow - H_ow)
+
+    # Small clearance so cable isn't intersecting fixture
+    clearance = 0.03 * min(W_ow, H_ow)
+    R_pocket = R_ow + clearance
+    dx_pocket = dx_ow
+
+    # Support thickness along Z: derived + clamped
+    t_support = 0.20 * L_extrude
+    t_support = max(1.2*H_ow, min(t_support, 3.0*H_ow))
+
+    # Block padding around envelope
+    pad_x   = 0.35 * W_ow
+    pad_y_up = 0.15 * H_ow
+    pad_y_dn = 0.55 * H_ow
+
+    # Pocket sits slightly below centerline so cable "rests"
+    x0 = 0.0
+    y0 = 0.0 #-0.10 * H_ow
+
+    # Place by construction: start sketch at z0 so extrusion spans [z0, z0+t_support]
+    z0 = z_center - 0.5*t_support
+    set_sketch_plane_xy_at_z(z0)
+
+    # Outer block rectangle
+    xmin = -(0.5*W_ow + pad_x)
+    xmax = +(0.5*W_ow + pad_x)
+    ymin = -(0.5*H_ow + pad_y_dn)
+    ymax = +(0.5*H_ow + pad_y_up)
+    sketch_rectangle_xy(xmin, xmax, ymin, ymax)
+
+    # Inner pocket loop
+    sketch_doubleD_shifted(x0, y0, dx_pocket, R_pocket)
+
+    temp_support = extrude_largest_face_along_z(name, t_support)
+    return temp_support
+
+def create_two_supports():
+    z1 = 0.20 * L_extrude
+    z2 = 0.80 * L_extrude
+
+    rigid_comp = get_or_create_component("RigidParts_3Point_Bending")
+
+    # --- If supports already exist, RETURN immediately (NO side-effects) ---
+    b1, c1 = find_body_anywhere_by_name("Rig_Support_1")
+    b2, c2 = find_body_anywhere_by_name("Rig_Support_2")
+
+    if b1 is not None and b2 is not None:
+        # Optional: ensure they live in the rigid component, but ONLY if needed
+        b1 = move_body_to_component_once(b1, c1, rigid_comp, "Rig_Support_1")
+        b2 = move_body_to_component_once(b2, c2, rigid_comp, "Rig_Support_2")
+
+        # IMPORTANT: do NOT recreate named selections here during debugging
+        return b1, b2
+
+    # --- Create missing ones ONLY ---
+    if b1 is None:
+        s1_tmp = create_support_with_doubleD_pocket("Rig_Support_1", z1)
+        b1 = move_body_to_component_once(s1_tmp, None, rigid_comp, "Rig_Support_1")
+        # create_ns("Rig_Support_1", b1)  # add back later
+
+    if b2 is None:
+        s2_tmp = create_support_with_doubleD_pocket("Rig_Support_2", z2)
+        b2 = move_body_to_component_once(s2_tmp, None, rigid_comp, "Rig_Support_2")
+        # create_ns("Rig_Support_2", b2)  # add back later
+
+    return b1, b2
+
+support1, support2 = create_two_supports()
+
+# ============================================================
+# 7G) OPEN THE SUPPORTS: CUT WITH ZX PLANE (Y=0) AND KEEP BOTTOM
+# ============================================================
+# ============================================================
+# 7G) OPEN THE SUPPORTS: SPLIT WITH ZX PLANE USING ByCutter(FACES)
+#   Signature: ByCutter(bodySelection, toolFacesSelection, extendSurfaces, [info])
 # ============================================================
 
-# Parameters for Supports
-Support_Diam = get_param("Support_Diam", H_outer)
-Support_Span = get_param("Support_Span", 2 * H_outer) # Distance between supports
-# Re-using Initial_Gap from Step 7, or you can define a new one
-Support_Gap  = get_param("Support_Gap", 0.5) 
+def set_sketch_plane_zx_at_y(y0):
+    # ZX plane at Y=y0. In-plane axes: Z (u), X (v)
+    frame = Frame.Create(
+        Point.Create(MM(0), MM(y0), MM(0)),
+        Direction.DirZ,
+        Direction.DirX
+    )
+    ViewHelper.SetSketchPlane(Plane.Create(frame))
 
-def create_supports_in_rigid_component():
-    r = Support_Diam / 2.0
-    
-    # ... (Geometry calculations remain the same) ...
-    cable_bot_y = -0.5 * (H_outer + 2.0 * t_overwrap)
-    y_center = cable_bot_y - Support_Gap - r
-    z_mid = 0.5 * L_extrude
-    z_left  = z_mid - (0.5 * Support_Span)
-    z_right = z_mid + (0.5 * Support_Span)
-    
-    rigid_comp = get_or_create_component("RigidParts_3Point_Bending")
-    
-    created_supports = []
-    
-    definitions = [
-        ("Rig_Support_Left",  z_left),
-        ("Rig_Support_Right", z_right)
-    ]
-    
-    for name, z_pos in definitions:
-        # FIX: Set the sketch plane INSIDE the loop.
-        # This forces SpaceClaim back into Sketch Mode for every new support.
-        set_sketch_plane_yz_at_x(-0.5 * Nose_Length) 
-        
-        # 1. Sketch
-        sketch_circle(y_center, z_pos, r)
-        
-        # 2. Extrude (This switches us to 3D mode)
-        temp_body = extrude_last_profile_along_x(name, Nose_Length)
-        
-        # 3. Move & Update Reference
-        final_body = move_body_to_component(temp_body, rigid_comp)
-        
-        # 4. Name Selection
-        create_ns(name, final_body)
-        
-        created_supports.append(final_body)
+def sketch_rectangle_uv(umin, umax, vmin, vmax):
+    # Rectangle in current sketch plane coords (u,v) mapped to Point2D(x,y)
+    SketchLine.Create(P2(umin, vmin), P2(umax, vmin))
+    SketchLine.Create(P2(umax, vmin), P2(umax, vmax))
+    SketchLine.Create(P2(umax, vmax), P2(umin, vmax))
+    SketchLine.Create(P2(umin, vmax), P2(umin, vmin))
 
-    return created_supports
-# Execute
-supports = create_supports_in_rigid_component()
+def make_thin_cutter_slab_ZX(y_cut=0.0, name="TMP_ZX_CUTTER"):
+    """
+    Make a very large, very thin slab centered at Y=y_cut.
+    We'll use its large +/-Y faces as tool faces for SplitBody.ByCutter.
+    """
+    W_ow = W_outer + 2.0*t_overwrap
+    H_ow = H_outer + 2.0*t_overwrap
+
+    halfZ = 1.20 * L_extrude
+    halfX = 1.50 * W_ow
+
+    tY = max(0.02 * H_ow, 0.05)  # thin but nonzero
+
+    # Build slab by extruding along +Y from plane at y_cut - tY/2
+    set_sketch_plane_zx_at_y(y_cut - 0.5*tY)
+
+    # In ZX sketch: u=Z, v=X
+    sketch_rectangle_uv(-halfZ, +halfZ, -halfX, +halfX)
+
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    face = max(list(temp_body.Faces), key=lambda f: f.Area)
+
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirY, MM(tY), opts)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Failed to create cutter slab body (no bodies created).")
+
+    slab = created[0]
+    slab.SetName(name)
+    return slab
+
+def _faces_with_normal_near_dir(faces, dir_vec, tol=0.95):
+    """
+    Return faces whose normal aligns with dir_vec (dot > tol).
+    Uses Face.Plane if available; falls back to picking by area if not.
+    """
+    out = []
+    for f in faces:
+        try:
+            # Works for planar faces
+            n = f.Plane.Normal
+            # dot product
+            d = n.X*dir_vec.X + n.Y*dir_vec.Y + n.Z*dir_vec.Z
+            if d > tol:
+                out.append(f)
+        except:
+            pass
+    return out
+
+def body_representative_y(body):
+    """
+    Returns a representative Y coordinate for the body by sampling a face centroid.
+    Works across SpaceClaim builds (no GetBoundingBox needed).
+    """
+    for f in list(body.Faces):
+        try:
+            pt = f.Eval(0.5, 0.5).Point  # face parametric midpoint
+            return pt.Y
+        except:
+            pass
+    # Fallback: origin if something is very wrong
+    return 0.0
+
+def split_by_ZX_faces_keep_bottom(body, y_cut=0.0, final_name=None):
+    """
+    Split 'body' using SplitBody.ByCutter with tool *faces* for a ZX cut at Y=y_cut.
+    Then delete ALL split pieces above, keeping exactly one (lowest representative Y).
+    This version does NOT trust split_res.CreatedBodies; it instead:
+      - renames the input body to a unique tag
+      - after split, finds all bodies anywhere whose name starts with that tag
+      - keeps the lowest-Y one, deletes the rest
+      - deletes the cutter slab
+    """
+
+    # -------- helpers local to this function --------
+    def body_representative_y(b):
+        for f in list(b.Faces):
+            try:
+                pt = f.Eval(0.5, 0.5).Point
+                return pt.Y
+            except:
+                pass
+        return 0.0
+
+    def _body_name(b):
+        try:
+            return b.GetName()
+        except:
+            return getattr(b, "Name", "")
+
+    def find_bodies_by_prefix_anywhere(prefix):
+        root = GetRootPart()
+        out = []
+
+        # root bodies
+        for b in list(root.Bodies):
+            if _body_name(b).startswith(prefix):
+                out.append(b)
+
+        # 1-level components
+        for comp in list(root.Components):
+            try:
+                for b in list(comp.Content.Bodies):
+                    if _body_name(b).startswith(prefix):
+                        out.append(b)
+            except:
+                pass
+
+        return out
+
+    def _faces_with_normal_near_dir(faces, dir_vec, tol=0.95):
+        out = []
+        for f in faces:
+            try:
+                n = f.Plane.Normal
+                d = n.X*dir_vec.X + n.Y*dir_vec.Y + n.Z*dir_vec.Z
+                if d > tol:
+                    out.append(f)
+            except:
+                pass
+        return out
+
+    # -------- 1) Create thin slab cutter centered at y_cut --------
+    slab = make_thin_cutter_slab_ZX(y_cut=y_cut, name="TMP_ZX_CUTTER")
+
+    # -------- 2) Pick tool faces from slab (prefer +/-Y faces; fallback to two largest) --------
+    slab_faces = list(slab.Faces)
+
+    plusY = _faces_with_normal_near_dir(slab_faces, Direction.DirY)
+
+    try:
+        dir_minusY = Direction.DirY.Negate()
+    except:
+        dir_minusY = Direction.Create(0, -1, 0)
+
+    minusY = _faces_with_normal_near_dir(slab_faces, dir_minusY)
+
+    tool_faces = []
+    if plusY:
+        tool_faces.append(max(plusY, key=lambda f: f.Area))
+    if minusY:
+        tool_faces.append(max(minusY, key=lambda f: f.Area))
+
+    if len(tool_faces) < 2:
+        tool_faces = sorted(slab_faces, key=lambda f: f.Area, reverse=True)[:2]
+
+    tool_faces_sel = Selection.Create(tool_faces)
+    body_sel = Selection.Create(body)
+
+    # -------- 3) Tag the body BEFORE split so we can find all split pieces reliably --------
+    tag = (final_name if final_name else _body_name(body))
+    if not tag:
+        tag = "RigSupport"
+    prefix = tag + "__SPLIT__"
+
+    # Ensure uniqueness enough for this run
+    body.SetName(prefix + "0")
+
+    # -------- 4) Split using your signature --------
+    extend_surfaces = True
+    SplitBody.ByCutter(body_sel, tool_faces_sel, extend_surfaces)
+
+    # -------- 5) Find all bodies produced from this split by name prefix --------
+    pieces = find_bodies_by_prefix_anywhere(prefix)
+
+    if len(pieces) < 2:
+        # Split didn’t create multiple bodies (or naming behavior differs)
+        # Cleanup cutter and return original body reference (which may be renamed)
+        try:
+            Delete.Execute(Selection.Create(slab))
+        except:
+            pass
+        print("WARNING: Could not find split pieces by prefix; leaving body as-is.")
+        if final_name:
+            try:
+                body.SetName(final_name)
+            except:
+                pass
+        return body
+
+    # -------- 6) Keep exactly ONE: the lowest-Y piece; delete all other pieces + slab --------
+    keeper = None
+    keeper_y = None
+    for b in pieces:
+        yb = body_representative_y(b)
+        if keeper is None or yb < keeper_y:
+            keeper = b
+            keeper_y = yb
+
+    to_delete = [b for b in pieces if b is not keeper]
+    if to_delete:
+        Delete.Execute(Selection.Create(to_delete))
+
+    Delete.Execute(Selection.Create(slab))
+
+    if final_name:
+        keeper.SetName(final_name)
+    else:
+        keeper.SetName(tag)
+
+    return keeper
+
+
+# --- APPLY ---
+support1 = split_by_ZX_faces_keep_bottom(support1, y_cut=0.0, final_name="Rig_Support_1")
+support2 = split_by_ZX_faces_keep_bottom(support2, y_cut=0.0, final_name="Rig_Support_2")
