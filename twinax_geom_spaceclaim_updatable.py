@@ -785,6 +785,8 @@ def move_all_root_bodies_to_component(comp_name):
 
 # --- EXECUTE THE MOVE ---
 move_all_root_bodies_to_component("cable_bodies")
+
+
 # ------------------------------------------------------------
 # ============================================================
 # 7) RIGID 3-POINT BENDING: LOADING NOSE  +  TWO DOUBLE-D SUPPORTS
@@ -818,6 +820,15 @@ def set_sketch_plane_xy_at_z(z0):
         Point.Create(MM(0), MM(0), MM(z0)),
         Direction.DirX,
         Direction.DirY
+    )
+    plane = Plane.Create(frame)
+    ViewHelper.SetSketchPlane(plane)
+    
+def set_sketch_plane_zx_at_y(x0):
+    frame = Frame.Create(
+        Direction.DirX,
+        Point.Create(MM(x0), MM(0), MM(0)),
+        Direction.DirZ
     )
     plane = Plane.Create(frame)
     ViewHelper.SetSketchPlane(plane)
@@ -1531,3 +1542,481 @@ def split_by_ZX_faces_keep_bottom(body, y_cut=0.0, final_name=None):
 # --- APPLY ---
 support1 = split_by_ZX_faces_keep_bottom(support1, y_cut=0.0, final_name="Rig_Support_1")
 support2 = split_by_ZX_faces_keep_bottom(support2, y_cut=0.0, final_name="Rig_Support_2")
+
+
+
+
+
+################################################################################################
+# ============================================================
+# 7) RIGID 3-POINT BENDING: LOADING NOSE  +  TWO DOUBLE-D SUPPORTS
+#   - Cable axis is Z (same as your extrusions)
+#   - U/pocket profiles sketched in XY, extruded along Z
+#   - Rigid bodies moved into component: RigidParts_3Point_Bending
+#   - Supports located at 20% and 80% of L_extrude
+# ============================================================
+
+# -----------------------------
+# Parameters (derived defaults)
+# -----------------------------
+
+# -----------------------------
+# Helpers (minimal + stable)
+# -----------------------------
+
+def get_or_create_component(name):
+    root = GetRootPart()
+    # Find existing
+    for c in list(root.Components):
+        try:
+            if c.GetName() == name:
+                return c
+        except:
+            if getattr(c, "Name", "") == name:
+                return c
+
+    # Create via Part blueprint + Component instance (your working style)
+    doc = Window.ActiveWindow.Document
+    part_def = Part.Create(doc, name)
+    comp = Component.Create(root, part_def)
+    return comp
+
+def move_body_to_component_and_refetch(body, target_component, final_name):
+    """
+    Moves 'body' into component and returns a stable reference by refetching via temp name.
+    This avoids 'Bodies[-1]' instability and prevents ping-pong / regen weirdness.
+    """
+    tmp_name = final_name + "__TEMP__"
+    body.SetName(tmp_name)
+
+    ComponentHelper.MoveBodiesToComponent(Selection.Create(body), target_component)
+
+    for b in list(target_component.Content.Bodies):
+        try:
+            if b.GetName() == tmp_name:
+                b.SetName(final_name)
+                return b
+        except:
+            if getattr(b, "Name", "") == tmp_name:
+                b.SetName(final_name)
+                return b
+
+    raise Exception("Moved body but could not refetch '%s' in target component." % final_name)
+
+def extrude_largest_face_along_y(name, length_mm):
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    faces = list(temp_body.Faces)
+    if not faces:
+        raise Exception("No faces found to extrude for %s (sketch not closed?)" % name)
+    face = max(faces, key=lambda f: f.Area)
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirY, MM(length_mm), options)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude created no bodies for %s" % name)
+
+    body = created[0]
+    body.SetName(name)
+    return body
+
+
+
+def sketch_rectangle_xy(xmin, xmax, ymin, ymax):
+    SketchLine.Create(P2(xmin, ymin), P2(xmax, ymin))
+    SketchLine.Create(P2(xmax, ymin), P2(xmax, ymax))
+    SketchLine.Create(P2(xmax, ymax), P2(xmin, ymax))
+    SketchLine.Create(P2(xmin, ymax), P2(xmin, ymin))
+
+def sketch_doubleD_shifted(x0, y0, dx, R):
+    # right arc
+    SketchArc.CreateSweepArc(P2(x0 + dx, y0), P2(x0 + dx, y0 + R), P2(x0 + dx, y0 - R), True)
+    # left arc
+    SketchArc.CreateSweepArc(P2(x0 - dx, y0), P2(x0 - dx, y0 + R), P2(x0 - dx, y0 - R), False)
+    # bridges
+    SketchLine.Create(P2(x0 - dx, y0 + R), P2(x0 + dx, y0 + R))
+    SketchLine.Create(P2(x0 - dx, y0 - R), P2(x0 + dx, y0 - R))
+
+# ============================================================
+# 7A) Loading Nose (YZ circle -> X extrude, centered by construction)
+def move_body_to_component(body, target_component):
+    """
+    Moves a body to a component and RETURNS THE NEW BODY.
+    Crucial: The original 'body' reference is invalid after the move.
+    """
+    sel = Selection.Create(body)
+    ComponentHelper.MoveBodiesToComponent(sel, target_component)
+    
+    # The body is now the last one in the target component's list
+    # We must return this NEW reference.
+    return target_component.Content.Bodies[-1]
+
+def extrude_last_profile_along_y(name, length_mm, pick_largest=True, dir_sign=+1):
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    face = max(temp_body.Faces, key=lambda f: f.Area) if pick_largest else temp_body.Faces[0]
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+
+    diry = Direction.DirY if dir_sign > 0 else Direction.DirY.Negate()
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), diry, MM(length_mm), options)
+    new_body = res.CreatedBodies[0]
+    new_body.SetName(name)
+    return new_body
+
+def create_loading_nose_in_rigid_component_bad():
+    r = Nose_Diam / 2.0
+
+    # ... (Geometry Math is same) ...
+    cable_top_x = 0.5 * (W_outer + 2.0 * t_overwrap)
+    x_center = cable_top_x + Initial_Gap + r
+    z_center = 0.5 * L_extrude
+
+    # ... (Sketch & Extrude is same) ...
+    set_sketch_plane_zx_at_y(-0.5 * Nose_Length)
+    sketch_circle(x_center, z_center, r)
+    
+    # This 'nose' is temporary (lives in Root)
+    temp_nose = extrude_last_profile_along_y("Rig_Loading_Nose_Bad", Nose_Length)
+
+    # ... (Organize) ...
+    rigid_comp = get_or_create_component("RigidParts_3Point_Bending_Bad")
+    
+    # FIX: Update 'nose' variable to the new body inside the component
+    final_nose = move_body_to_component(temp_nose, rigid_comp)
+
+    # ... (Named Selection) ...
+    # Now we use 'final_nose', which is a valid reference
+    create_ns("Rig_Loading_Nose_Bad", final_nose)
+
+    return final_nose
+
+# Execute
+nose_body_bad = create_loading_nose_in_rigid_component_bad()
+
+# ============================================================
+# 7F) RIGID 3-POINT BENDING: TWO SUPPORTS WITH DOUBLE-D POCKET
+#   - Pocket follows OUTER OVERWRAP shape (double-D envelope)
+#   - Sketch in XY, extrude in Z (cable axis)
+#   - Supports at 20% and 80% of L_extrude
+#   - No boolean needed (pocket from sketch loops)
+# ============================================================
+def move_body_to_component_and_refetch(body, target_component, final_name):
+    """
+    Move body into component and refetch by name (stable).
+    Avoids relying on 'Bodies[-1]' which can be unstable.
+    """
+    # Ensure unique temp name before move
+    body.SetName(final_name + "__TEMP__")
+
+    sel = Selection.Create(body)
+    ComponentHelper.MoveBodiesToComponent(sel, target_component)
+
+    # Refetch by name inside the target component
+    for b in list(target_component.Content.Bodies):
+        try:
+            if b.GetName() == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+        except:
+            if getattr(b, "Name", "") == final_name + "__TEMP__":
+                b.SetName(final_name)
+                return b
+
+    raise Exception("Moved body but could not refetch '%s' in target component." % final_name)
+
+def set_sketch_plane_xy_at_z(z0):
+    frame = Frame.Create(
+        Point.Create(MM(0), MM(0), MM(z0)),
+        Direction.DirX,
+        Direction.DirY
+    )
+    plane = Plane.Create(frame)
+    ViewHelper.SetSketchPlane(plane)
+
+def sketch_rectangle_xy(xmin, xmax, ymin, ymax):
+    SketchLine.Create(P2(xmin, ymin), P2(xmax, ymin))
+    SketchLine.Create(P2(xmax, ymin), P2(xmax, ymax))
+    SketchLine.Create(P2(xmax, ymax), P2(xmin, ymax))
+    SketchLine.Create(P2(xmin, ymax), P2(xmin, ymin))
+
+
+# ============================================================
+# 7B) Two Supports with Double-D Pocket (XY sketch -> Z extrude)
+# ============================================================
+
+
+def create_two_supports_bad():
+    z1 = 0.20 * L_extrude
+    z2 = 0.80 * L_extrude
+
+    rigid_comp = get_or_create_component("RigidParts_3Point_Bending_Bad")
+
+    # --- If supports already exist, RETURN immediately (NO side-effects) ---
+    b1, c1 = find_body_anywhere_by_name("Rig_Support_Bad_1")
+    b2, c2 = find_body_anywhere_by_name("Rig_Support_Bad_2")
+
+    if b1 is not None and b2 is not None:
+        # Optional: ensure they live in the rigid component, but ONLY if needed
+        b1 = move_body_to_component_once(b1, c1, rigid_comp, "Rig_Support_Bad_1")
+        b2 = move_body_to_component_once(b2, c2, rigid_comp, "Rig_Support_Bad_2")
+
+        # IMPORTANT: do NOT recreate named selections here during debugging
+        return b1, b2
+
+    # --- Create missing ones ONLY ---
+    if b1 is None:
+        s1_tmp = create_support_with_doubleD_pocket("Rig_Support_Bad_1", z1)
+        b1 = move_body_to_component_once(s1_tmp, None, rigid_comp, "Rig_Support_Bad_1")
+        # create_ns("Rig_Support_1", b1)  # add back later
+
+    if b2 is None:
+        s2_tmp = create_support_with_doubleD_pocket("Rig_Support_Bad_2", z2)
+        b2 = move_body_to_component_once(s2_tmp, None, rigid_comp, "Rig_Support_Bad_2")
+        # create_ns("Rig_Support_2", b2)  # add back later
+
+    return b1, b2
+
+support1_bad, support2_bad = create_two_supports_bad()
+
+# ============================================================
+# 7G) OPEN THE SUPPORTS: CUT WITH ZX PLANE (Y=0) AND KEEP BOTTOM
+# ============================================================
+# ============================================================
+# 7G) OPEN THE SUPPORTS: SPLIT WITH ZX PLANE USING ByCutter(FACES)
+#   Signature: ByCutter(bodySelection, toolFacesSelection, extendSurfaces, [info])
+# ============================================================
+
+def set_sketch_plane_zx_at_y(y0):
+    # ZX plane at Y=y0. In-plane axes: Z (u), X (v)
+    frame = Frame.Create(
+        Point.Create(MM(0), MM(y0), MM(0)),
+        Direction.DirZ,
+        Direction.DirX
+    )
+    ViewHelper.SetSketchPlane(Plane.Create(frame))
+
+def sketch_rectangle_uv(umin, umax, vmin, vmax):
+    # Rectangle in current sketch plane coords (u,v) mapped to Point2D(x,y)
+    SketchLine.Create(P2(umin, vmin), P2(umax, vmin))
+    SketchLine.Create(P2(umax, vmin), P2(umax, vmax))
+    SketchLine.Create(P2(umax, vmax), P2(umin, vmax))
+    SketchLine.Create(P2(umin, vmax), P2(umin, vmin))
+
+def make_thin_cutter_slab_YZ(x_cut=0.0, name="TMP_YZ_CUTTER"):
+    """
+    Make a very large, very thin slab centered at X=x_cut.
+    We'll use its large +/-X faces as tool faces for SplitBody.ByCutter.
+    """
+    W_ow = W_outer + 2.0*t_overwrap
+    H_ow = H_outer + 2.0*t_overwrap
+
+    halfZ = 1.20 * L_extrude
+    halfY = 1.50 * H_ow
+
+    tX = max(0.02 * W_ow, 0.05)  # thin but nonzero
+
+    # Build slab by extruding along +X from plane at x_cut - tX/2
+    set_sketch_plane_yz_at_x(x_cut - 0.5*tX)
+
+    # In YZ sketch: u=Z, v=Y
+    sketch_rectangle_uv(-halfZ, +halfZ, -halfY, +halfY)
+
+    solidify_sketch()
+    temp_body = GetRootPart().Bodies[-1]
+    face = max(list(temp_body.Faces), key=lambda f: f.Area)
+
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirX, MM(tX), opts)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Failed to create cutter slab body (no bodies created).")
+
+    slab = created[0]
+    slab.SetName(name)
+    return slab
+
+def _faces_with_normal_near_dir(faces, dir_vec, tol=0.95):
+    """
+    Return faces whose normal aligns with dir_vec (dot > tol).
+    Uses Face.Plane if available; falls back to picking by area if not.
+    """
+    out = []
+    for f in faces:
+        try:
+            # Works for planar faces
+            n = f.Plane.Normal
+            # dot product
+            d = n.X*dir_vec.X + n.Y*dir_vec.Y + n.Z*dir_vec.Z
+            if d > tol:
+                out.append(f)
+        except:
+            pass
+    return out
+
+def body_representative_x(body):
+    """
+    Returns a representative X coordinate for the body by sampling a face centroid.
+    Works across SpaceClaim builds (no GetBoundingBox needed).
+    """
+    for f in list(body.Faces):
+        try:
+            pt = f.Eval(0.5, 0.5).Point  # face parametric midpoint
+            return pt.X
+        except:
+            pass
+    # Fallback: origin if something is very wrong
+    return 0.0
+
+def split_by_YZ_faces_keep_bottom(body, x_cut=0.0, final_name=None):
+    """
+    Split 'body' using SplitBody.ByCutter with tool *faces* for a YZ cut at x=x_cut.
+    Then delete ALL split pieces above, keeping exactly one (lowest representative X).
+    This version does NOT trust split_res.CreatedBodies; it instead:
+      - renames the input body to a unique tag
+      - after split, finds all bodies anywhere whose name starts with that tag
+      - keeps the lowest-X one, deletes the rest
+      - deletes the cutter slab
+    """
+
+    # -------- helpers local to this function --------
+    def body_representative_x(b):
+        for f in list(b.Faces):
+            try:
+                pt = f.Eval(0.5, 0.5).Point
+                return pt.X
+            except:
+                pass
+        return 0.0
+
+    def _body_name(b):
+        try:
+            return b.GetName()
+        except:
+            return getattr(b, "Name", "")
+
+    def find_bodies_by_prefix_anywhere(prefix):
+        root = GetRootPart()
+        out = []
+
+        # root bodies
+        for b in list(root.Bodies):
+            if _body_name(b).startswith(prefix):
+                out.append(b)
+
+        # 1-level components
+        for comp in list(root.Components):
+            try:
+                for b in list(comp.Content.Bodies):
+                    if _body_name(b).startswith(prefix):
+                        out.append(b)
+            except:
+                pass
+
+        return out
+
+    def _faces_with_normal_near_dir(faces, dir_vec, tol=0.95):
+        out = []
+        for f in faces:
+            try:
+                n = f.Plane.Normal
+                d = n.X*dir_vec.X + n.Y*dir_vec.Y + n.Z*dir_vec.Z
+                if d > tol:
+                    out.append(f)
+            except:
+                pass
+        return out
+
+    # -------- 1) Create thin slab cutter centered at x_cut --------
+    slab = make_thin_cutter_slab_YZ(x_cut=x_cut, name="TMP_YZ_CUTTER")
+
+    # -------- 2) Pick tool faces from slab (prefer +/-X faces; fallback to two largest) --------
+    slab_faces = list(slab.Faces)
+
+    plusX = _faces_with_normal_near_dir(slab_faces, Direction.DirX)
+
+    try:
+        dir_minusX = Direction.DirX.Negate()
+    except:
+        dir_minusX = Direction.Create(-1, 0, 0)
+
+    minusX = _faces_with_normal_near_dir(slab_faces, dir_minusX)
+
+    tool_faces = []
+    if plusX:
+        tool_faces.append(max(plusX, key=lambda f: f.Area))
+    if minusX:
+        tool_faces.append(max(minusX, key=lambda f: f.Area))
+
+    if len(tool_faces) < 2:
+        tool_faces = sorted(slab_faces, key=lambda f: f.Area, reverse=True)[:2]
+
+    tool_faces_sel = Selection.Create(tool_faces)
+    body_sel = Selection.Create(body)
+
+    # -------- 3) Tag the body BEFORE split so we can find all split pieces reliably --------
+    tag = (final_name if final_name else _body_name(body))
+    if not tag:
+        tag = "RigSupport"
+    prefix = tag + "__SPLIT__"
+
+    # Ensure uniqueness enough for this run
+    body.SetName(prefix + "0")
+
+    # -------- 4) Split using your signature --------
+    extend_surfaces = True
+    SplitBody.ByCutter(body_sel, tool_faces_sel, extend_surfaces)
+
+    # -------- 5) Find all bodies produced from this split by name prefix --------
+    pieces = find_bodies_by_prefix_anywhere(prefix)
+
+    if len(pieces) < 2:
+        # Split didn’t create multiple bodies (or naming behavior differs)
+        # Cleanup cutter and return original body reference (which may be renamed)
+        try:
+            Delete.Execute(Selection.Create(slab))
+        except:
+            pass
+        print("WARNING: Could not find split pieces by prefix; leaving body as-is.")
+        if final_name:
+            try:
+                body.SetName(final_name)
+            except:
+                pass
+        return body
+
+    # -------- 6) Keep exactly ONE: the lowest-X piece; delete all other pieces + slab --------
+    keeper = None
+    keeper_x = None
+    for b in pieces:
+        xb = body_representative_x(b)
+        if keeper is None or xb < keeper_x:
+            keeper = b
+            keeper_x = xb
+
+    to_delete = [b for b in pieces if b is not keeper]
+    if to_delete:
+        Delete.Execute(Selection.Create(to_delete))
+
+    Delete.Execute(Selection.Create(slab))
+
+    if final_name:
+        keeper.SetName(final_name)
+    else:
+        keeper.SetName(tag)
+
+    return keeper
+
+
+# --- APPLY ---
+support1 = split_by_YZ_faces_keep_bottom(support1_bad, x_cut=0.0, final_name="Rig_Support_Bad_1")
+support2 = split_by_YZ_faces_keep_bottom(support2_bad, x_cut=0.0, final_name="Rig_Support_Bad_2")
+
+
+
