@@ -390,29 +390,64 @@ def extrude_and_name(name, length_mm, pick_largest=False):
     return new_body
 
 
+def _get_named_selection_by_name(ns_name):
+    try:
+        root = GetRootPart()
+        for ns in list(root.NamedSelections):
+            try:
+                if ns.GetName() == ns_name:
+                    return ns
+            except:
+                if getattr(ns, "Name", "") == ns_name:
+                    return ns
+    except:
+        pass
+    return None
+
+def _delete_named_selection_if_exists(ns_name):
+    ns = _get_named_selection_by_name(ns_name)
+    if ns is None:
+        return
+    try:
+        Delete.Execute(Selection.Create(ns))
+    except:
+        try:
+            ns.Delete()
+        except:
+            pass
 
 def create_ns(name, body_or_list):
-
-    """Creates a Named Selection in the Groups tab for ANSYS Mechanical"""
+    """Creates a Named Selection in the Groups tab for ANSYS Mechanical (idempotent)."""
 
     if isinstance(body_or_list, list):
-
         items = body_or_list
-
     else:
-
         items = [body_or_list]
 
+    # Avoid empty groups
+    items = [b for b in items if b is not None]
+    if not items:
+        print("create_ns skipped (no bodies) for:", name)
+        return
+
+    ns_name = "NS_" + name
+
+    # IMPORTANT: delete any existing NS with same name first
+    _delete_named_selection_if_exists(ns_name)
 
     sel = BodySelection.Create(items)
+    res = NamedSelection.Create(sel, Selection.Empty())
 
-    # Create the group and rename it
-
-    design_group = NamedSelection.Create(sel, Selection.Empty())
-
-    design_group.CreatedNamedSelection.SetName("NS_" + name)
-  
-
+    # Robust rename
+    try:
+        res.CreatedNamedSelection.SetName(ns_name)
+    except Exception as e:
+        print("WARNING: failed to rename Named Selection to", ns_name, ":", e)
+        # try to delete the stray "Group1" we just made
+        try:
+            Delete.Execute(Selection.Create(res.CreatedNamedSelection))
+        except:
+            pass
 # 3. BUILD GEOMETRY
 
 # -----------------------------
@@ -822,23 +857,43 @@ def get_or_create_component(name):
     return comp
 
 def move_body_to_component(body, target_component):
-    sel = Selection.Create(body)
+    nm = _body_name(body)
+    sel = BodySelection.Create([body])
     ComponentHelper.MoveBodiesToComponent(sel, target_component)
-    return target_component.Content.Bodies[-1]   # new reference
+
+    # Refetch by name in target
+    for b in list(target_component.Content.Bodies):
+        if _body_name(b) == nm:
+            return b
+    # fallback
+    return target_component.Content.Bodies[-1]
+
 
 def move_body_to_component_once(body, current_comp, target_comp, final_name):
     if current_comp is target_comp:
+        try:
+            body.SetName(final_name)
+        except:
+            pass
         return body
+
     tmp_name = final_name + "__TEMP__"
     body.SetName(tmp_name)
-    ComponentHelper.MoveBodiesToComponent(Selection.Create(body), target_comp)
+
+    sel = BodySelection.Create([body])
+    ComponentHelper.MoveBodiesToComponent(sel, target_comp)
+
+    # Refetch + rename
     for b in list(target_comp.Content.Bodies):
         if _body_name(b) == tmp_name:
             b.SetName(final_name)
             return b
+
+    # Fallback: if it already exists somehow
     for b in list(target_comp.Content.Bodies):
         if _body_name(b) == final_name:
             return b
+
     raise Exception("Move succeeded but could not refetch moved body: " + final_name)
 
 def find_body_anywhere_by_name(name):
@@ -966,6 +1021,14 @@ def extrude_largest_face_along_z(name, length_mm):
 # 7A) Loading Nose (GOOD/BAD)
 # ============================================================
 def create_loading_nose(mode):
+
+    if mode == "good":
+        comp = get_or_create_component("RigidParts_3Point_Bending")
+
+        existing, existing_comp = find_body_anywhere_by_name("Rig_Loading_Nose")
+        if existing is not None:
+            return move_body_to_component_once(existing, existing_comp, comp, "Rig_Loading_Nose")
+        
     r = Nose_Diam / 2.0
     z_center = 0.5 * L_extrude
 
@@ -1256,9 +1319,13 @@ s1, s2 = create_two_supports(mode)
 if mode == "good":
     s1 = split_by_ZX_faces_keep_bottom(s1, y_cut=0.0, final_name="Rig_Support_1")
     s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
+    create_ns("Rig_Support_1", s1)
+    create_ns("Rig_Support_2", s2)
 else:
     s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_Bad_1")
     s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_Bad_2")
+    create_ns("Rig_Support_Bad_1", s1)
+    create_ns("Rig_Support_Bad_2", s2)
 
 # Optional: named selections for supports if you want
 # create_ns(_body_name(s1), s1)
