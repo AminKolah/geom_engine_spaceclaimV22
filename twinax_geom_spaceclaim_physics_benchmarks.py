@@ -1,13 +1,13 @@
-# Python Script, API Version = V22
+# Python Script, API Version = V242
 
 
 import math
 
-from SpaceClaim.Api.V22 import *
+from SpaceClaim.Api.V242 import *
 
-from SpaceClaim.Api.V22.Geometry import *
+from SpaceClaim.Api.V242.Geometry import *
 
-from SpaceClaim.Api.V22.Modeler import *
+from SpaceClaim.Api.V242.Modeler import *
 
 ClearAll()
 
@@ -373,22 +373,37 @@ def sketch_wrap_loop_with_drains(offset):
 
         
 
-def extrude_and_name(name, length_mm, pick_largest=False):
+def _largest_xy_face(body):
+    best = None
+    bestA = -1.0
+    for f in list(body.Faces):
+        try:
+            n = f.Plane.Normal
+            # face normal near ±Z indicates XY face
+            if abs(n.Z) > 0.95:
+                if f.Area > bestA:
+                    best = f
+                    bestA = f.Area
+        except:
+            pass
+    return best
 
+def extrude_and_name(name, length_mm, pick_largest=False):
     solidify_sketch()
     temp_body = GetRootPart().Bodies[-1]
-    if pick_largest:
-        target_face = sorted(temp_body.Faces, key=lambda f: f.Area, reverse=True)[0]
-    else:
-        target_face = temp_body.Faces[0]
+
+    face = _largest_xy_face(temp_body)
+    if face is None:
+        # fallback
+        face = max(list(temp_body.Faces), key=lambda f: f.Area)
 
     options = ExtrudeFaceOptions()
     options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(target_face), Direction.DirZ, MM(length_mm), options)
-    new_body = res.CreatedBodies[0]
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
+
+    new_body = list(res.CreatedBodies)[0]
     new_body.SetName(name)
     return new_body
-
 
 def _get_named_selection_by_name(ns_name):
     try:
@@ -467,7 +482,7 @@ sketch_circle(dx_cond, 0, r_cond)
 
 c2 = extrude_and_name("conductor[2]", L_extrude)
 
-create_ns("conductor[2]", c1)
+create_ns("conductor[2]", c2)
 
 
 # (2) Cores (Insulation)
@@ -788,6 +803,116 @@ cleanup_sheet_bodies(delete_all_non_solids=True, name_filter=None, verbose=True)
 # -----------------------------
 # ORGANIZING: Move Cable to Component
 # -----------------------------
+def _comp_by_name(name):
+    root = GetRootPart()
+    for c in list(root.Components):
+        try:
+            if c.GetName() == name:
+                return c
+        except:
+            if getattr(c, "Name", "") == name:
+                return c
+    return None
+
+
+def body_volume_mm3(body):
+    """
+    Returns volume in mm^3 if possible. If the API returns internal units,
+    the value is still consistent for 'near zero' detection.
+    """
+
+    # --- Attempt 1: MassProperties on body (some versions expose this directly)
+    try:
+        mp = body.MassProperties
+        v = float(mp.Volume)
+        return v
+    except:
+        pass
+
+    # --- Attempt 2: GetVolume / Volume property on body
+    for attr in ["GetVolume", "Volume"]:
+        try:
+            v = getattr(body, attr)
+            if callable(v):
+                v = v()
+            v = float(v)
+            return v
+        except:
+            pass
+
+    # --- Attempt 3: Mass properties via a Selection (common pattern)
+    # Different builds expose different helpers; try a couple names.
+    sel = BodySelection.Create([body])
+
+    # 3a) MeasureHelper.GetMassProperties(...)
+    try:
+        mp = MeasureHelper.GetMassProperties(sel)
+        v = float(mp.Volume)
+        return v
+    except:
+        pass
+
+    # 3b) MassProperties.Create(...) or similar
+    try:
+        mp = MassProperties.Create(sel)
+        v = float(mp.Volume)
+        return v
+    except:
+        pass
+
+    # If all fail, return None (we'll report it)
+    return None
+
+
+def delete_zero_volume_bodies_in_component(comp_name, vol_tol=1e-6, verbose=True):
+    """
+    Deletes bodies in the given component whose volume <= vol_tol.
+    Also prints a volume report for later use.
+    """
+
+    comp = _comp_by_name(comp_name)
+    if comp is None:
+        print("Component not found:", comp_name)
+        return []
+
+    bodies = list(comp.Content.Bodies)
+    if not bodies:
+        print("No bodies found in component:", comp_name)
+        return []
+
+    report = []
+    victims = []
+    unknown = []
+
+    for b in bodies:
+        v = body_volume_mm3(b)
+        nm = getattr(b, "Name", "<?>")
+
+        if v is None:
+            unknown.append(b)
+            if verbose:
+                print("VOL=??   ", nm, "(could not compute)")
+            continue
+
+        report.append((nm, v))
+        if verbose:
+            print("VOL=%g  %s" % (v, nm))
+
+        if abs(v) <= vol_tol:
+            victims.append(b)
+
+    if victims:
+        Delete.Execute(BodySelection.Create(victims))
+        print("Deleted %d zero-volume bodies (tol=%g) from %s" % (len(victims), vol_tol, comp_name))
+    else:
+        print("No zero-volume bodies found (tol=%g) in %s" % (vol_tol, comp_name))
+
+    if unknown:
+        print("WARNING: %d bodies had unknown volume (not deleted)." % len(unknown))
+
+    # Return volume report sorted by absolute volume (useful later)
+    report_sorted = sorted(report, key=lambda t: abs(t[1]))
+    return report_sorted
 
 def move_all_root_bodies_to_component(comp_name):
 
@@ -818,9 +943,34 @@ def move_all_root_bodies_to_component(comp_name):
     
     print("Moved " + str(len(root_bodies)) + " bodies to component: " + comp_name)
 
+
+# Delete surface bodies by near-zero volume
+def delete_bodies_by_exact_name_in_component(comp_name, exact_name="Surface", verbose=True):
+    comp = _comp_by_name(comp_name)
+    if comp is None:
+        print("Component not found:", comp_name)
+        return
+
+    victims = []
+    for b in list(comp.Content.Bodies):
+        nm = getattr(b, "Name", "")
+        if nm == exact_name:
+            victims.append(b)
+
+    if not victims:
+        if verbose:
+            print("No bodies named '%s' found in %s." % (exact_name, comp_name))
+        return
+
+    Delete.Execute(BodySelection.Create(victims))
+    if verbose:
+        print("Deleted %d bodies named '%s' in %s." % (len(victims), exact_name, comp_name))
+
+
 # --- EXECUTE THE MOVE ---
 move_all_root_bodies_to_component("cable_bodies")
-
+delete_bodies_by_exact_name_in_component("cable_bodies", "Surface", verbose=True)
+    
 # ============================================================
 # 3-POINT BENDING RIG (GOOD + BAD) — SINGLE SCRIPT
 # Choose mode via BENDING_MODE = "good" or "bad"
@@ -1066,9 +1216,27 @@ def create_loading_nose(mode):
 # ============================================================
 # 7F/7B) Supports (shared geometry; different names/components)
 # ============================================================
+def cable_envelope_with_optional_drains():
+    """
+    Returns (W_eff, H_eff) for the OUTER envelope the supports should cover.
+    - No drains: classic W_outer/H_outer + 2*t_overwrap
+    - With drains: width expands to include drain OD + overwrap
+    """
+    H_eff = H_outer + 2.0*t_overwrap
+
+    if drain_opt:
+        # drain center is already defined in your script before overwrap
+        # x_drain = dx_shield + R_shield + r_drain
+        half_width = x_drain + (r_drain + t_overwrap)
+        W_eff = 2.0 * half_width
+    else:
+        W_eff = W_outer + 2.0*t_overwrap
+
+    return W_eff, H_eff
+
+
 def create_support_with_doubleD_pocket(name, z_center):
-    W_ow = W_outer + 2.0*t_overwrap
-    H_ow = H_outer + 2.0*t_overwrap
+    W_ow, H_ow = cable_envelope_with_optional_drains()
     R_ow  = 0.5 * H_ow
     dx_ow = 0.5 * (W_ow - H_ow)
 
@@ -1302,7 +1470,7 @@ def split_by_YZ_faces_keep_bottom(body, x_cut=0.0, final_name=None):
     keeper.SetName(final_name if final_name else tag)
     return keeper
 
-# ============================================================
+#==========================================================
 # RUN PIPELINE
 # ============================================================
 mode = BENDING_MODE.lower().strip()
@@ -1330,4 +1498,5 @@ else:
 # Optional: named selections for supports if you want
 # create_ns(_body_name(s1), s1)
 # create_ns(_body_name(s2), s2)
-# Python Script, API Version = V22
+# Python Script, API Version = V242
+
