@@ -32,10 +32,21 @@ drain_opt    = float(Parameters.has_drains) if hasattr(Parameters, 'has_drains')
 is_a_doublet = int(Parameters.is_a_doublet) if hasattr(Parameters, 'is_a_doublet') else 0
 is_elliptic  = int(Parameters.is_elliptic) if hasattr(Parameters, 'is_elliptic') else 1
 h_mix        = float(Parameters.mixing_factor) if hasattr(Parameters, 'mixing_factor') else 0.7
-
+bending_benchmark_opt = int(Parameters.bending_mode_option) if hasattr(Parameters, 'bending_mode_option') else 0
 # filler_mode logic
 
 filler_mode = "shell" if filler_opt == 1 else "fill"
+
+if bending_benchmark_opt == 0:
+    bending_mode = "good_3point"
+elif bending_benchmark_opt == 1:
+    bending_mode = "bad_3point"
+elif bending_benchmark_opt == 2:
+    bending_mode = "good_2pulleys"
+elif bending_benchmark_opt == 3:
+    bending_mode = "bad_2pulleys"
+else:
+    raise Exception("Unknown bending_mode_option: %s" % bending_benchmark_opt)
 
 # Conductor and Core
 
@@ -973,10 +984,10 @@ delete_bodies_by_exact_name_in_component("cable_bodies", "Surface", verbose=True
     
 # ============================================================
 # 3-POINT BENDING RIG (GOOD + BAD) — SINGLE SCRIPT
-# Choose mode via BENDING_MODE = "good" or "bad"
+# Choose mode via bending_mode = "good_3point" or "bad_3point" or "good_2pullyes", or "bad_2pulleys"
 # ============================================================
 
-BENDING_MODE = "good"   # "good" or "bad"
+
 
 # -----------------------------
 # Parameters (derived defaults)
@@ -1172,7 +1183,7 @@ def extrude_largest_face_along_z(name, length_mm):
 # ============================================================
 def create_loading_nose(mode):
 
-    if mode == "good":
+    if mode == "good_3point":
         comp = get_or_create_component("RigidParts_3Point_Bending")
 
         existing, existing_comp = find_body_anywhere_by_name("Rig_Loading_Nose")
@@ -1182,7 +1193,7 @@ def create_loading_nose(mode):
     r = Nose_Diam / 2.0
     z_center = 0.5 * L_extrude
 
-    if mode == "good":
+    if mode == "good_3point":
         # Good: nose above (+Y), sketch on YZ@x, extrude along X
         cable_top_y = 0.5 * (H_outer + 2.0*t_overwrap)
         y_center = cable_top_y + Initial_Gap + r
@@ -1196,18 +1207,18 @@ def create_loading_nose(mode):
         create_ns("Rig_Loading_Nose", final_nose)
         return final_nose
 
-    elif mode == "bad":
+    elif mode == "bad_3point":
         # Bad: nose on side (+X), sketch on ZX@y, extrude along Y
-        cable_top_x = 0.5 * (W_outer + 2.0*t_overwrap)
+        cable_top_x = 0.5 * (W_outer + 2.0*t_overwrap + 2.0*D_drain if drain_opt else 0.0)
         x_center = cable_top_x + Initial_Gap + r
 
         set_sketch_plane_zx_at_y(-0.5 * Nose_Length)
         sketch_circle(z_center, x_center, r)
 
-        temp_nose = extrude_last_profile_along_y("Rig_Loading_Nose_Bad", Nose_Length)
-        comp = get_or_create_component("RigidParts_3Point_Bending_Bad")
+        temp_nose = extrude_last_profile_along_y("Rig_Loading_Nose", Nose_Length)
+        comp = get_or_create_component("RigidParts_3Point_Bending")
         final_nose = move_body_to_component(temp_nose, comp)
-        create_ns("Rig_Loading_Nose_Bad", final_nose)
+        create_ns("Rig_Loading_Nose", final_nose)
         return final_nose
 
     else:
@@ -1271,12 +1282,9 @@ def create_two_supports(mode):
     z1 = 0.10 * L_extrude
     z2 = 0.90 * L_extrude
 
-    if mode == "good":
+    if mode == "good_3point" or "bad_3point":
         comp_name = "RigidParts_3Point_Bending"
         n1, n2 = "Rig_Support_1", "Rig_Support_2"
-    elif mode == "bad":
-        comp_name = "RigidParts_3Point_Bending_Bad"
-        n1, n2 = "Rig_Support_Bad_1", "Rig_Support_Bad_2"
     else:
         raise Exception("Unknown mode: %s" % mode)
 
@@ -1292,10 +1300,18 @@ def create_two_supports(mode):
 
     if b1 is None:
         s1_tmp = create_support_with_doubleD_pocket(n1, z1)
-        b1 = move_body_to_component_once(s1_tmp, None, rigid_comp, n1)
+        if mode == "good_3point":
+            s1 = split_by_ZX_faces_keep_bottom(s1_tmp, y_cut=0.0, final_name=n1)
+        else:
+            s1 = split_by_YZ_faces_keep_bottom(s1_tmp, x_cut=0.0, final_name=n1)
+        b1 = move_body_to_component_once(s1, None, rigid_comp, n1)
 
     if b2 is None:
         s2_tmp = create_support_with_doubleD_pocket(n2, z2)
+        if mode == "good_3point":
+            s2 = split_by_ZX_faces_keep_bottom(s2_tmp, y_cut=0.0, final_name=n2)
+        else:
+            s2 = split_by_YZ_faces_keep_bottom(s2_tmp, x_cut=0.0, final_name=n2)
         b2 = move_body_to_component_once(s2_tmp, None, rigid_comp, n2)
 
     return b1, b2
@@ -1470,33 +1486,175 @@ def split_by_YZ_faces_keep_bottom(body, x_cut=0.0, final_name=None):
     keeper.SetName(final_name if final_name else tag)
     return keeper
 
+def angle_360():
+    # Try a few common patterns used across SC versions
+    try:
+        return Angle.Create(2.0 * math.pi)      # radians
+    except:
+        pass
+    try:
+        return Angle.Create(MM(360.0))          # unlikely but harmless
+    except:
+        pass
+    try:
+        return Angle.Degrees(360.0)             # some builds expose this
+    except:
+        pass
+    try:
+        return 360.0                             # some builds just accept float degrees
+    except:
+        pass
+    return 360.0
+def pick_planar_face(body):
+    # Revolve wants a real planar face; pick the largest is usually correct
+    faces = list(body.Faces)
+    if not faces:
+        raise Exception("No faces found on temp body for revolve (sketch not closed?)")
+    return max(faces, key=lambda f: f.Area)
+def create_groove_tool_revolved_about_x(name, pulley_R, W_ow, H_ow, clear):
+    # Inflate the cable envelope for clearance
+    Wg = W_ow + 2.0*clear
+    Hg = H_ow + 2.0*clear
+    Rg  = 0.5 * Hg
+    dxg = 0.5 * (Wg - Hg)
+
+    # Place profile center at (Y=pulley_R, Z=0) in the YZ plane
+    yc = pulley_R
+    zc = 0.0
+
+    # Sketch on YZ at x = 0
+    set_sketch_plane_yz_at_x(0.0)
+
+    # IMPORTANT: your sketch_doubleD_shifted_YZ must actually draw a CLOSED loop
+    sketch_doubleD_shifted_YZ(yc, zc, dxg, Rg)
+
+    solidify_sketch()
+
+    # The last created "sketch fill" body is usually at root
+    temp = GetRootPart().Bodies[-1]
+    face = pick_planar_face(temp)
+
+    # Axis of revolution: X axis through origin
+    axis_line = Line.Create(Point.Create(MM(0), MM(0), MM(0)), Direction.DirX)
+
+    opts = RevolveFaceOptions()
+    opts.RevolveType = RevolveType.ForceIndependent
+
+    ang = angle_360()
+
+    # Try common Execute signatures
+    try:
+        res = RevolveFaces.Execute(FaceSelection.Create(face), axis_line, ang, opts)
+    except:
+        # some builds swap order or take different selection wrappers
+        res = RevolveFaces.Execute(Selection.Create(face), axis_line, ang, opts)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("RevolveFaces returned no bodies (profile may be open or self-intersecting).")
+
+    tool = created[0]
+    tool.SetName(name)
+
+    # Delete the temp sketch-fill body (optional cleanup)
+    try:
+        Delete.Execute(Selection.Create(temp))
+    except:
+        pass
+
+    return tool
+
+def create_two_pulley_rig():
+    comp = get_or_create_component("RigidParts_2Pulley")
+
+    W_ow = W_outer + 2.0*t_overwrap
+    H_ow = H_outer + 2.0*t_overwrap
+
+    zc = 0.5 * L_extrude
+
+    # Center of pulleys above/below the cable mid-height
+    y_offset = 0.5*H_ow + Pulley_Gap + Pulley_R
+
+    # -------------------------
+    # Helper: create wheel body
+    # -------------------------
+    def create_wheel(name, y0):
+        set_sketch_plane_yz_at_x(-0.5 * Pulley_Width)
+        sketch_circle(y0, zc, Pulley_R)
+        wheel = extrude_last_profile_along_x(name, Pulley_Width, pick_largest=True)
+        return wheel
+
+    # --------------------------------------------
+    # Helper: build + place + subtract groove tool
+    # --------------------------------------------
+    def cut_groove_into_wheel(wheel, tool_name, y0):
+        # Build tool at x=0, centered at (Y=pulley_R, Z=0) by construction
+        tool = create_groove_tool_revolved_about_x(
+            tool_name,
+            pulley_R=Pulley_R,
+            W_ow=W_ow,
+            H_ow=H_ow,
+            clear=Pulley_Clear
+        )
+
+        # Move tool so its center matches wheel center:
+        # tool currently centered at (Y=Pulley_R, Z=0). We need (Y=y0, Z=zc).
+        dy = y0 - Pulley_R
+        dz = zc - 0.0
+
+        Move.Translate(Selection.Create(tool), Direction.DirY, MM(dy))
+        Move.Translate(Selection.Create(tool), Direction.DirZ, MM(dz))
+
+        # Subtract
+        subtract_tool_from_target(wheel, tool)
+
+        # Cleanup tool body
+        try:
+            Delete.Execute(Selection.Create(tool))
+        except:
+            pass
+
+    # ==============
+    # TOP pulley
+    # ==============
+    wheel_top = create_wheel("Rig_Pulley_Top", y0=+y_offset)
+    cut_groove_into_wheel(wheel_top, "TMP_GROOVE_Top", y0=+y_offset)
+    wheel_top = move_body_to_component(wheel_top, comp)
+    create_ns("Rig_Pulley_Top", wheel_top)
+
+    # ==============
+    # BOTTOM pulley
+    # ==============
+    wheel_bot = create_wheel("Rig_Pulley_Bot", y0=-y_offset)
+    cut_groove_into_wheel(wheel_bot, "TMP_GROOVE_Bot", y0=-y_offset)
+    wheel_bot = move_body_to_component(wheel_bot, comp)
+    create_ns("Rig_Pulley_Bot", wheel_bot)
+
+    return wheel_top, wheel_bot
 #==========================================================
 # RUN PIPELINE
 # ============================================================
-mode = BENDING_MODE.lower().strip()
-if mode not in ["good", "bad"]:
-    raise Exception("BENDING_MODE must be 'good' or 'bad'")
+mode = bending_mode.lower().strip()
+if mode not in ["good_3point", "bad_3point", "good_2pulleys", "bad_2pulleys"]:
+    raise Exception("bending_mode must be 'good_3point', 'bad_3point', 'good_2pulleys', or 'bad_2pullyes'")
 
-# 1) Nose
-nose_body = create_loading_nose(mode)
 
-# 2) Supports (create/reuse)
-s1, s2 = create_two_supports(mode)
 
 # 3) Open supports (mode-dependent)
-if mode == "good":
-    s1 = split_by_ZX_faces_keep_bottom(s1, y_cut=0.0, final_name="Rig_Support_1")
-    s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
-    create_ns("Rig_Support_1", s1)
-    create_ns("Rig_Support_2", s2)
-else:
-    s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_Bad_1")
-    s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_Bad_2")
-    create_ns("Rig_Support_Bad_1", s1)
-    create_ns("Rig_Support_Bad_2", s2)
-
-# Optional: named selections for supports if you want
+if mode in ["good_3point", "bad_3point"]:
+    nose_body = create_loading_nose(mode)
+    s1, s2 = create_two_supports(mode)
+    if mode == "good_3point":
+       # s1 = split_by_ZX_faces_keep_bottom(s1, y_cut=0.0, final_name="Rig_Support_1")
+        #s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
+        create_ns("Rig_Support_1", s1)
+        create_ns("Rig_Support_2", s2)
+    else:
+       # s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_1")
+       # s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_2")
+        create_ns("Rig_Support_1", s1)
+        create_ns("Rig_Support_2", s2)
+    # Optional: named selections for supports if you want
 # create_ns(_body_name(s1), s1)
 # create_ns(_body_name(s2), s2)
 # Python Script, API Version = V242
-
