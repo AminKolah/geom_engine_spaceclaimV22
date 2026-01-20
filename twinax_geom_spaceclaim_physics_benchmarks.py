@@ -1,13 +1,13 @@
-# Python Script, API Version = V242
+# Python Script, API Version = V252
 
 
 import math
 
-from SpaceClaim.Api.V242 import *
+from SpaceClaim.Api.V252 import *
 
-from SpaceClaim.Api.V242.Geometry import *
+from SpaceClaim.Api.V252.Geometry import *
 
-from SpaceClaim.Api.V242.Modeler import *
+from SpaceClaim.Api.V252.Modeler import *
 
 ClearAll()
 
@@ -1657,4 +1657,7 @@ if mode in ["good_3point", "bad_3point"]:
     # Optional: named selections for supports if you want
 # create_ns(_body_name(s1), s1)
 # create_ns(_body_name(s2), s2)
-# Python Script, API Version = V242
+# Python Script, API Version = V252
+
+
+
