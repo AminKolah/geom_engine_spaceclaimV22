@@ -25,6 +25,8 @@ def get_param(name, default_val):
     except: return default_val
 
 
+run_benchmark_rig = False  # Set to True to enable 3-point rig creation
+
 # Logic options using the Parameters check pattern
 
 filler_opt   = int(Parameters.filler_option) if hasattr(Parameters, 'filler_option') else 0
@@ -88,8 +90,7 @@ multilumen_shape_mode = "trapezoidal" if multilumen_shape_opt == 1 else "circula
 # Derived values
 
 r_cond, r_core, r_drain = D_cond/2.0, D_core/2.0, D_drain/2.0
-dx_cond = C2C / 2.0
-if (filler_mode == "shell" and D_core != C2C): D_core = C2C
+
 
 # Shield inner dimensions
 
@@ -100,6 +101,25 @@ dx_in = (W_in - H_in) / 2.0
 R_shield = H_outer / 2.0
 dx_shield = (W_outer - H_outer) / 2.0
 
+
+## Take care of the tangency situation between the two cores
+overlap_tol = 0.012  # mm
+
+# Geometry relationship between conductor spacing and core size
+
+if (filler_mode == "shell"): 
+    D_core = C2C
+elif (filler_mode == "fill"):
+    delta = C2C - D_core
+    # snap away from zero-thickness tangency
+    if abs(delta) < overlap_tol:
+        # choose one:
+        # C2C = D_core + overlap_tol            # Policy A (always spaced)
+        C2C = D_core + overlap_tol if delta > 0 else D_core - overlap_tol  # Policy B
+        delta = C2C - D_core
+
+    core_mode = "spaced" if delta > 0 else "merged" 
+dx_cond = C2C / 2.0
 # -----------------------------
 # 2. HELPER FUNCTIONS
 # -----------------------------
@@ -382,7 +402,41 @@ def sketch_wrap_loop_with_drains(offset):
         SketchNurbs.CreateFrom2DPoints(False, pts_top)
         SketchNurbs.CreateFrom2DPoints(False, pts_bot)
 
+def share_topology_pair(body_a, body_b, verbose=True):
+    if body_a is None or body_b is None:
+        return
+
+    # 1. Set the 'Share Topology' property on the Component
+    # This is what Mechanical 2025 R2 looks at to merge nodes.
+    try:
+        # Get the component containing body_a
+        comp = body_a.Parent
+        if hasattr(comp, 'SharedTopology'):
+            comp.SharedTopology = SharedTopology.Share # Options: Share, Merge, None
+            if verbose: print("Component Property set to 'Share' for:", body_a.Name)
+    except Exception as e:
+        if verbose: print("Failed to set SharedTopology property:", e)
+
+    # 2. Physical Imprint (The 'Repair' way)
+    # This physically creates the edges where bodies touch.
+    try:
+        selection = BodySelection.Create([body_a, body_b])
+        # In 252, Imprint is often found in the 'Repair' namespace or via the 'PowerSelect'
+        # This is the most stable 252 command for imprinting
+        options = ImprintOptions()
+        # You can set options.Tolerance = MM(0.01) if needed
+        Imprint.Execute(selection, options)
         
+        if verbose: print("Physical Imprint successful between:", body_a.Name, "and", body_b.Name)
+    except Exception as e_imprint:
+        if verbose: print("Physical Imprint failed:", e_imprint)
+        
+        # Final Fallback: The 'Share' tool in the Repair tab
+        try:
+            Share.Share(selection) # This is the 2025 R2 'Share' button logic
+            if verbose: print("Repair.Share successful.")
+        except:
+            if verbose: print("All sharing methods failed.")
 
 def _largest_xy_face(body):
     best = None
@@ -400,6 +454,40 @@ def _largest_xy_face(body):
     return best
 
 def extrude_and_name(name, length_mm, pick_largest=False):
+    root = GetRootPart()
+    before = list(root.Bodies)
+
+    solidify_sketch()
+
+    after = list(root.Bodies)
+    new_bodies = [b for b in after if b not in before]
+
+    if not new_bodies:
+        raise Exception(
+            "Solidify produced NO sketch-fill body for '%s'. "
+            "Profile is likely not closed (tiny gap/overlap), or multiple regions." % name
+        )
+
+    temp_body = new_bodies[-1]
+
+    face = _largest_xy_face(temp_body)
+    if face is None:
+        face = max(list(temp_body.Faces), key=lambda f: f.Area)
+
+    options = ExtrudeFaceOptions()
+    options.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude produced no result for '%s' (wrong face or invalid profile)." % name)
+
+    new_body = created[0]
+    new_body.SetName(name)
+    return new_body
+
+
+def extrude_and_name_old(name, length_mm, pick_largest=False):
     solidify_sketch()
     temp_body = GetRootPart().Bodies[-1]
 
@@ -441,6 +529,65 @@ def _delete_named_selection_if_exists(ns_name):
             ns.Delete()
         except:
             pass
+
+
+
+def union_bodies(name, bodies):
+    """
+    Robust union/merge for SpaceClaim.
+    - Tries Boolean.Unite first (most reliable for solids)
+    - Falls back to Combine.Merge patterns used in some builds
+    Returns the resulting body (best effort).
+    """
+    bodies = [b for b in bodies if b is not None]
+    if len(bodies) < 2:
+        return bodies[0] if bodies else None
+
+    # Ensure they are in the root part's body list (or same component) if possible
+    # (Not strictly required, but helps avoid some failures.)
+
+    # --- Try Boolean.Unite (preferred) ---
+    try:
+        # Often expects a Selection, not BodySelection
+        res = Boolean.Unite(Selection.Create(bodies))
+        # Different return shapes across builds
+        try:
+            out = list(res.CreatedBodies)[0]
+        except:
+            try:
+                out = res.Body
+            except:
+                out = bodies[0]
+        try:
+            out.SetName(name)
+        except:
+            pass
+        return out
+    except Exception as e1:
+        print("Boolean.Unite failed:", e1)
+
+    # --- Try Combine.Merge variants ---
+    try:
+        res = Combine.Merge(Selection.Create(bodies))
+        # Sometimes you get MergedBody, sometimes CreatedBodies
+        try:
+            out = res.MergedBody
+        except:
+            try:
+                out = list(res.CreatedBodies)[0]
+            except:
+                out = bodies[0]
+        try:
+            out.SetName(name)
+        except:
+            pass
+        return out
+    except Exception as e2:
+        print("Combine.Merge failed:", e2)
+
+    # If we got here, union failed
+    raise Exception("Union failed. Bodies may not intersect/touch, or are invalid (sheet, separate components, etc.).")
+
 
 def create_ns(name, body_or_list):
     """Creates a Named Selection in the Groups tab for ANSYS Mechanical (idempotent)."""
@@ -485,7 +632,7 @@ sketch_circle(-dx_cond, 0, r_cond)
 
 c1 = extrude_and_name("conductor[1]", L_extrude)
 
-create_ns("conductor[1]", c1)
+#create_ns("conductor[1]", c1)
 
 set_sketch_plane_xy()
 
@@ -493,7 +640,7 @@ sketch_circle(dx_cond, 0, r_cond)
 
 c2 = extrude_and_name("conductor[2]", L_extrude)
 
-create_ns("conductor[2]", c2)
+#create_ns("conductor[2]", c2)
 
 
 # (2) Cores (Insulation)
@@ -578,7 +725,30 @@ if not (is_a_doublet):
        # extrude_and_name("single_core[2]", L_extrude, True)
 
 
-        # Function to draw the core with lumens
+                # Function to draw the core with lumens
+        def merge_bodies_keep_name(name, bodies):
+            bodies = [b for b in bodies if b is not None]
+            if len(bodies) < 2:
+                return bodies[0] if bodies else None
+
+            res = Combine.Merge(BodySelection.Create(bodies))
+
+            # Return shape varies by build
+            out = None
+            if hasattr(res, "MergedBody") and res.MergedBody is not None:
+                out = res.MergedBody
+            else:
+                try:
+                    out = list(res.CreatedBodies)[0]
+                except:
+                    out = bodies[0]
+
+            try:
+                out.SetName(name)
+            except:
+                pass
+
+            return out
 
         def sketch_core_with_lumens(center_x):
             set_sketch_plane_xy()
@@ -647,30 +817,70 @@ if not (is_a_doublet):
 
 
         # Build Core 1
+        if core_mode == "spaced":
+            sketch_core_with_lumens(-dx_cond)
+            score1 = extrude_and_name("single_core[1]", L_extrude, True)
 
-        sketch_core_with_lumens(-dx_cond)
-        score1 = extrude_and_name("single_core[1]", L_extrude, True)
-        create_ns("single_core[1]", score1)
+            sketch_core_with_lumens(dx_cond)
+            score2 = extrude_and_name("single_core[2]", L_extrude, True)
 
-        # Build Core 2
 
-        sketch_core_with_lumens(dx_cond)
-        score2 = extrude_and_name("single_core[2]", L_extrude, True)
-        create_ns("single_core[2]", score2)
+        elif core_mode == "merged":
+            # Build BOTH multilumen cores first (left + right), then Boolean-union them
+            set_sketch_plane_xy()
+            sketch_core_with_lumens(-dx_cond)
+            core1 = extrude_and_name("temp_core1", L_extrude, True)
+
+            sketch_core_with_lumens(+dx_cond)
+            core2 = extrude_and_name("temp_core2", L_extrude, True)
+            #score = extrude_and_name("single_core_merged", L_extrude, True)
+            # Union
+            score = union_bodies("single_core_merged", [core1, core2])
+            #score = merge_bodies_keep_name("single_core_merged", [core1, core2])
+
+            # only delete bodies that are NOT the output
+            victims = []
+            for b in [core1, core2]:
+                if b is not score:
+                    victims.append(b)
+            if victims:
+                try: Delete.Execute(BodySelection.Create(victims))
+                except: pass
 
     else:
 
-        set_sketch_plane_xy()
-        sketch_circle(-dx_cond, 0, r_core)
-        sketch_circle(-dx_cond, 0, r_cond)
-        score1 = extrude_and_name("single_core[1]", L_extrude, True)
-        create_ns("single_core[1]", score1)
+        if core_mode == "spaced":
+            set_sketch_plane_xy()
+            sketch_circle(-dx_cond, 0, r_core)
+            sketch_circle(-dx_cond, 0, r_cond)
+            score1 = extrude_and_name("single_core[1]", L_extrude, True)
 
-        set_sketch_plane_xy()
-        sketch_circle(dx_cond, 0, r_core)
-        sketch_circle(dx_cond, 0, r_cond)
-        score2 = extrude_and_name("single_core[2]", L_extrude, True)
-        create_ns("single_core[2]", score2)
+
+            set_sketch_plane_xy()
+            sketch_circle(dx_cond, 0, r_core)
+            sketch_circle(dx_cond, 0, r_cond)
+            score2 = extrude_and_name("single_core[2]", L_extrude, True)
+
+
+        elif core_mode == "merged":
+            # Create both overlapping single core bodies first
+            set_sketch_plane_xy()
+            sketch_circle(-dx_cond, 0, r_core)
+            sketch_circle(-dx_cond, 0, r_cond)
+            core1 = extrude_and_name("temp_core1", L_extrude, True)
+
+            set_sketch_plane_xy()
+            sketch_circle(dx_cond, 0, r_core)
+            sketch_circle(dx_cond, 0, r_cond)
+            core2 = extrude_and_name("temp_core2", L_extrude, True)
+
+            # Perform Boolean Merge (Union)
+            score = union_bodies("single_core_merged", [core1, core2])
+
+            # Assign final name and NS
+            #merged_result.SetName("single_core_merged")
+            #create_ns("single_core_merged", merged_result)
+            
 
 # (3) Filler / Doublet
 
@@ -682,7 +892,7 @@ if is_a_doublet:
     sketch_circle(-dx_cond, 0, r_cond)
     sketch_circle(dx_cond, 0, r_cond)
     second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    create_ns("Second_Extrusion", second_extrusion)
+    #create_ns("Second_Extrusion", second_extrusion)
 
 elif filler_mode == "fill":
 
@@ -690,7 +900,7 @@ elif filler_mode == "fill":
     sketch_circle(-dx_cond, 0, r_core)
     sketch_circle(dx_cond, 0, r_core)
     second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    create_ns("Second_Extrusion", second_extrusion)
+    #create_ns("Second_Extrusion", second_extrusion)
 
 elif filler_mode == "shell":
 
@@ -708,15 +918,30 @@ elif filler_mode == "shell":
     sketch_circle(-dx_cond, 0, r_core)
     sketch_circle(dx_cond, 0, r_core)
     second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    create_ns("Second_Extrusion", second_extrusion)
+    #create_ns("Second_Extrusion", second_extrusion)
+
+
+# --- SHARE TOPOLOGY / IMPRINT CHAIN (do this BEFORE Named Selections) ---
+# conductor ↔ core
+#share_topology_pair(c1, score1)
+#share_topology_pair(c2, score2)
+
+# core ↔ second extrusion
+#share_topology_pair(score1, second_extrusion)
+#share_topology_pair(score2, second_extrusion)
+
+# (optional) if you actually need shield interfaces conformal:
+# share_topology_pair(shield, second_extrusion)
+# share_topology_pair(shield, overwrap)
 
 
 # (4) Shield
-
+print("Shield params: W_outer=%.4f H_outer=%.4f dx_shield=%.4f R_shield=%.4f"
+      % (W_outer, H_outer, dx_shield, R_shield))
 set_sketch_plane_xy()
 sketch_profile(dx_shield, R_shield, W_outer, H_outer)
 shield = extrude_and_name("Shield", L_extrude, True)
-create_ns("Shield", shield)
+#create_ns("Shield", shield)
 
 
 # (5) Drains
@@ -728,11 +953,11 @@ if drain_opt:
     set_sketch_plane_xy()
     sketch_circle(-x_drain, 0, r_drain)
     drain1 = extrude_and_name("drain[1]", L_extrude)
-    create_ns("drain[1]", drain1)
+    #create_ns("drain[1]", drain1)
     set_sketch_plane_xy()
     sketch_circle(x_drain, 0, r_drain)
     drain2 = extrude_and_name("drain[2]", L_extrude)
-    create_ns("drain[2]", drain2)
+    #create_ns("drain[2]", drain2)
 
 
 # (6) Overwrap
@@ -747,7 +972,7 @@ if drain_opt:
     sketch_wrap_loop_with_drains(0)
     sketch_wrap_loop_with_drains(t_overwrap)
     overwrap = extrude_and_name("Overwrap", L_extrude, True)
-    create_ns("Overwrap", overwrap)
+    #create_ns("Overwrap", overwrap)
 
 else:
 
@@ -755,7 +980,9 @@ else:
     set_sketch_plane_xy()
     sketch_profile(dx_shield, R_shield + t_overwrap, W_outer + 2*t_overwrap, H_outer + 2*t_overwrap)
     overwrap = extrude_and_name("Overwrap", L_extrude, True)
-    create_ns("Overwrap", overwrap)
+    #create_ns("Overwrap", overwrap)
+
+
 
 # -----------------------------
 
@@ -986,16 +1213,6 @@ delete_bodies_by_exact_name_in_component("cable_bodies", "Surface", verbose=True
 # 3-POINT BENDING RIG (GOOD + BAD) — SINGLE SCRIPT
 # Choose mode via bending_mode = "good_3point" or "bad_3point" or "good_2pullyes", or "bad_2pulleys"
 # ============================================================
-
-
-
-# -----------------------------
-# Parameters (derived defaults)
-# -----------------------------
-Initial_Gap  = get_param("Initial_Gap",  0.05 * (H_outer + 2.0*t_overwrap))
-Nose_Diam    = get_param("Nose_Diam",    1.5  * (H_outer + 2.0*t_overwrap))
-Nose_Length  = get_param("Nose_Length",  4.0  * (H_outer + 2.0*t_overwrap))
-
 # ============================================================
 # Helpers (stable / minimal)
 # ============================================================
@@ -1178,6 +1395,30 @@ def extrude_largest_face_along_z(name, length_mm):
     body.SetName(name)
     return body
 
+
+
+# --- NOW create Named Selections (last) ---
+create_ns("conductor[1]", find_body_anywhere_by_name("conductor[1]")[0])
+create_ns("conductor[2]", find_body_anywhere_by_name("conductor[2]")[0])
+if core_mode != "merged":
+    create_ns("single_core[1]", find_body_anywhere_by_name("single_core[1]")[0])
+    create_ns("single_core[2]", find_body_anywhere_by_name("single_core[2]")[0])
+else:
+    create_ns("single_core_merged", find_body_anywhere_by_name("single_core_merged")[0])
+create_ns("Second_Extrusion", find_body_anywhere_by_name("Second_Extrusion")[0])
+create_ns("Shield", find_body_anywhere_by_name("Shield")[0])
+if drain_opt:
+    create_ns("drain[1]", find_body_anywhere_by_name("drain[1]")[0])
+    create_ns("drain[2]", find_body_anywhere_by_name("drain[2]")[0])
+create_ns("Overwrap", find_body_anywhere_by_name("Overwrap")[0])
+
+# -----------------------------
+# Parameters (derived defaults)
+# -----------------------------
+Initial_Gap  = get_param("Initial_Gap",  0.05 * (H_outer + 2.0*t_overwrap))
+Nose_Diam    = get_param("Nose_Diam",    1.5  * (H_outer + 2.0*t_overwrap))
+Nose_Length  = get_param("Nose_Length",  4.0  * (H_outer + 2.0*t_overwrap))
+
 # ============================================================
 # 7A) Loading Nose (GOOD/BAD)
 # ============================================================
@@ -1282,7 +1523,7 @@ def create_two_supports(mode):
     z1 = 0.10 * L_extrude
     z2 = 0.90 * L_extrude
 
-    if mode == "good_3point" or "bad_3point":
+    if mode in ["good_3point", "bad_3point"]:
         comp_name = "RigidParts_3Point_Bending"
         n1, n2 = "Rig_Support_1", "Rig_Support_2"
     else:
@@ -1634,30 +1875,30 @@ def create_two_pulley_rig():
 #==========================================================
 # RUN PIPELINE
 # ============================================================
-mode = bending_mode.lower().strip()
-if mode not in ["good_3point", "bad_3point", "good_2pulleys", "bad_2pulleys"]:
-    raise Exception("bending_mode must be 'good_3point', 'bad_3point', 'good_2pulleys', or 'bad_2pullyes'")
+
+
+if run_benchmark_rig:
+    mode = bending_mode.lower().strip()
+    if mode not in ["good_3point", "bad_3point", "good_2pulleys", "bad_2pulleys"]:
+        raise Exception("bending_mode must be 'good_3point', 'bad_3point', 'good_2pulleys', or 'bad_2pullyes'")
 
 
 
-# 3) Open supports (mode-dependent)
-if mode in ["good_3point", "bad_3point"]:
-    nose_body = create_loading_nose(mode)
-    s1, s2 = create_two_supports(mode)
-    if mode == "good_3point":
-       # s1 = split_by_ZX_faces_keep_bottom(s1, y_cut=0.0, final_name="Rig_Support_1")
-        #s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
-        create_ns("Rig_Support_1", s1)
-        create_ns("Rig_Support_2", s2)
-    else:
-       # s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_1")
-       # s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_2")
-        create_ns("Rig_Support_1", s1)
-        create_ns("Rig_Support_2", s2)
-    # Optional: named selections for supports if you want
-# create_ns(_body_name(s1), s1)
-# create_ns(_body_name(s2), s2)
-# Python Script, API Version = V252
-
-
-
+    # 3) Open supports (mode-dependent)
+    if mode in ["good_3point", "bad_3point"]:
+        nose_body = create_loading_nose(mode)
+        s1, s2 = create_two_supports(mode)
+        if mode == "good_3point":
+           # s1 = split_by_ZX_faces_keep_bottom(s1, y_cut=0.0, final_name="Rig_Support_1")
+            #s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
+            create_ns("Rig_Support_1", s1)
+            create_ns("Rig_Support_2", s2)
+        else:
+           # s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_1")
+           # s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_2")
+            create_ns("Rig_Support_1", s1)
+            create_ns("Rig_Support_2", s2)
+        # Optional: named selections for supports if you want
+    # create_ns(_body_name(s1), s1)
+    # create_ns(_body_name(s2), s2)
+    # Python Script, API Version = V252
