@@ -402,7 +402,51 @@ def sketch_wrap_loop_with_drains(offset):
         SketchNurbs.CreateFrom2DPoints(False, pts_top)
         SketchNurbs.CreateFrom2DPoints(False, pts_bot)
 
-def share_topology_pair(body_a, body_b, verbose=True):
+def share_topology_pair(body_a, body_b, mode="share_only", verbose=True):
+    """
+    mode:
+      - "share_only": sets SharedTopology only (HFSS-cleanest)
+      - "share_and_imprint": sets SharedTopology + tries Imprint/Repair.Share (stronger, may fragment faces)
+    """
+    if body_a is None or body_b is None:
+        return
+
+    # --- 1) Set SharedTopology on BOTH parents (not just body_a) ---
+    for b in [body_a, body_b]:
+        try:
+            comp = b.Parent
+            if hasattr(comp, 'SharedTopology'):
+                comp.SharedTopology = SharedTopology.Share
+                if verbose:
+                    print("Component Property set to 'Share' for:", b.Name)
+        except Exception as e:
+            if verbose:
+                print("Failed to set SharedTopology property for", b.Name, ":", e)
+
+    # --- 2) Optionally imprint ---
+    if mode != "share_and_imprint":
+        return
+
+    try:
+        selection = BodySelection.Create([body_a, body_b])
+        options = ImprintOptions()
+        Imprint.Execute(selection, options)
+        if verbose:
+            print("Physical Imprint successful between:", body_a.Name, "and", body_b.Name)
+    except Exception as e_imprint:
+        if verbose:
+            print("Physical Imprint failed:", e_imprint)
+        try:
+            Share.Share(selection)
+            if verbose:
+                print("Repair.Share successful.")
+        except:
+            if verbose:
+                print("All sharing methods failed.")
+
+
+
+def share_topology_pair_old(body_a, body_b, verbose=True):
     if body_a is None or body_b is None:
         return
 
@@ -921,20 +965,6 @@ elif filler_mode == "shell":
     #create_ns("Second_Extrusion", second_extrusion)
 
 
-# --- SHARE TOPOLOGY / IMPRINT CHAIN (do this BEFORE Named Selections) ---
-# conductor ↔ core
-#share_topology_pair(c1, score1)
-#share_topology_pair(c2, score2)
-
-# core ↔ second extrusion
-#share_topology_pair(score1, second_extrusion)
-#share_topology_pair(score2, second_extrusion)
-
-# (optional) if you actually need shield interfaces conformal:
-# share_topology_pair(shield, second_extrusion)
-# share_topology_pair(shield, overwrap)
-
-
 # (4) Shield
 print("Shield params: W_outer=%.4f H_outer=%.4f dx_shield=%.4f R_shield=%.4f"
       % (W_outer, H_outer, dx_shield, R_shield))
@@ -1411,6 +1441,284 @@ if drain_opt:
     create_ns("drain[1]", find_body_anywhere_by_name("drain[1]")[0])
     create_ns("drain[2]", find_body_anywhere_by_name("drain[2]")[0])
 create_ns("Overwrap", find_body_anywhere_by_name("Overwrap")[0])
+
+
+# --- SHARE TOPOLOGY / IMPRINT CHAIN (do this BEFORE Named Selections) ---
+def _safe_Name(obj):
+    # Always return a plain python string, never throw.
+    if obj is None:
+        return "<None>"
+
+    # 1) Try Name (property) safely
+    try:
+        n = getattr(obj, "Name", None)
+        if n is not None:
+            try:
+                # sometimes it's already a string, sometimes not
+                return str(n)
+            except:
+                return "<Name-unprintable>"
+    except:
+        pass
+
+    # 2) Try GetName() safely (some SC objects prefer this)
+    try:
+        if hasattr(obj, "GetName"):
+            n = obj.GetName()
+            if n is not None:
+                try:
+                    return str(n)
+                except:
+                    return "<GetName-unprintable>"
+    except:
+        pass
+
+    # 3) Last resort: type info only (avoid str(obj))
+    try:
+        return "<%s>" % obj.GetType().FullName
+    except:
+        pass
+
+    return "<UnknownObject>"
+
+
+def _get_parent_component_or_part(body):
+    """
+    In SpaceClaim, body.Parent is often a Component (or Part/RootPart-ish depending on context).
+    We treat it as the object that may carry SharedTopology.
+    """
+    try:
+        return body.Parent
+    except:
+        return None
+
+def _set_shared_topology_on_parent(body, verbose=True):
+    parent = _get_parent_component_or_part(body)
+    if parent is None:
+        if verbose:
+            print("SharedTopology: could not access parent for", _safe_name(body))
+        return False
+
+    # Some builds expose SharedTopology on the parent component; some don’t.
+    if hasattr(parent, "SharedTopology"):
+        try:
+            parent.SharedTopology = SharedTopology.Share  # Share, Merge, None
+            if verbose:
+                print("SharedTopology set to Share on parent of", _safe_name(body),
+                      "parent=", _safe_name(parent))
+            return True
+        except Exception as e:
+            if verbose:
+                print("SharedTopology: failed to set on parent of", _safe_name(body), ":", e)
+            return False
+
+    if verbose:
+        print("SharedTopology: parent has no SharedTopology attribute for", _safe_name(body),
+              "parent=", _safe_name(parent))
+    return False
+
+def share_topology_pair_WIP(body_a, body_b,
+                       mode="share_only",
+                       imprint_tol_mm=None,
+                       verbose=True):
+    """
+    mode:
+      - "share_only": sets SharedTopology on parents (HFSS-cleanest)
+      - "share_and_imprint": sets SharedTopology + tries Imprint/Repair.Share (strongest, but can fragment faces)
+
+    imprint_tol_mm:
+      - None: leave default imprint tolerance
+      - float: sets ImprintOptions().Tolerance = MM(imprint_tol_mm) when available
+    """
+
+    if body_a is None or body_b is None:
+        return False
+
+    if body_a is body_b:
+        if verbose:
+            print("share_topology_pair: same body provided; skipping:", _safe_name(body_a))
+        return True
+
+    # 1) Always do SharedTopology flag first (low-risk, Mechanical-friendly)
+    ok_a = _set_shared_topology_on_parent(body_a, verbose=verbose)
+    ok_b = _set_shared_topology_on_parent(body_b, verbose=verbose)
+
+    # If user only wants the “WB share topology” behavior, stop here.
+    if mode.lower().strip() in ["share_only", "share"]:
+        if verbose:
+            print("share_topology_pair: mode=share_only; done.")
+        return (ok_a or ok_b)
+
+    # 2) Optional: physical imprint / repair-share (higher risk for HFSS)
+    sel = None
+    try:
+        sel = BodySelection.Create([body_a, body_b])
+    except Exception as e:
+        if verbose:
+            print("share_topology_pair: failed to create BodySelection:", e)
+        return False
+
+    # Try Imprint.Execute first (if available)
+    try:
+        options = ImprintOptions()
+        # Not all builds expose Tolerance on ImprintOptions, so guard it.
+        if imprint_tol_mm is not None and hasattr(options, "Tolerance"):
+            options.Tolerance = MM(float(imprint_tol_mm))
+
+        Imprint.Execute(sel, options)
+        if verbose:
+            print("Imprint.Execute OK between:", _safe_name(body_a), "and", _safe_name(body_b),
+                  ("tol=%.6g mm" % imprint_tol_mm) if imprint_tol_mm is not None else "")
+        return True
+
+    except Exception as e_imprint:
+        if verbose:
+            print("Imprint.Execute failed:", e_imprint)
+
+    # Fallback: Repair Share tool (sometimes exists as Share.Share)
+    try:
+        # Depending on the build, Share.Share might accept Selection.Create([...]) or BodySelection.
+        try:
+            Share.Share(sel)
+        except:
+            Share.Share(Selection.Create([body_a, body_b]))
+        if verbose:
+            print("Repair.Share OK between:", _safe_name(body_a), "and", _safe_name(body_b))
+        return True
+    except Exception as e_share:
+        if verbose:
+            print("Repair.Share failed:", e_share)
+
+    if verbose:
+        print("share_topology_pair: all methods failed for:",
+              _safe_name(body_a), "<->", _safe_name(body_b))
+    return False
+
+def _as_body(x):
+    if x is None: return None
+    if isinstance(x, list) or isinstance(x, tuple):
+        return x[0] if x else None
+    return x    
+
+def share_topology_pair(body_a, body_b, mode="share_only", verbose=True):
+    """
+    mode:
+      - "share_only": sets SharedTopology on parents (HFSS-cleanest)
+      - "share_and_imprint": sets SharedTopology + tries Imprint/Repair.Share (strongest, but can fragment faces)
+    """
+    if body_a is None or body_b is None:
+        return
+
+    # 1. Set the 'Share Topology' property on the Component
+    # This is what Mechanical 2025 R2 looks at to merge nodes.
+    try:
+        # Get the component containing body_a
+        comp = body_a.Parent
+        if hasattr(comp, 'SharedTopology'):
+            comp.SharedTopology = SharedTopology.Share # Options: Share, Merge, None
+            if verbose: print("Component Property set to 'Share' for:", body_a.Name)
+    except Exception as e:
+        if verbose: print("Failed to set SharedTopology property:", e)
+
+    if mode != "share_and_imprint":
+        return  
+    
+    # 2. Physical Imprint (The 'Repair' way)
+    # This physically creates the edges where bodies touch.
+    try:
+        selection = BodySelection.Create([body_a, body_b])
+        # In 252, Imprint is often found in the 'Repair' namespace or via the 'PowerSelect'
+        # This is the most stable 252 command for imprinting
+        options = ImprintOptions()
+        # You can set options.Tolerance = MM(0.01) if needed
+        Imprint.Execute(selection, options)
+        
+        if verbose: print("Physical Imprint successful between:", body_a.Name, "and", body_b.Name)
+    except Exception as e_imprint:
+        if verbose: print("Physical Imprint failed:", e_imprint)
+        
+        # Final Fallback: The 'Share' tool in the Repair tab
+        try:
+            Share.Share(selection) # This is the 2025 R2 'Share' button logic
+            if verbose: print("Repair.Share successful.")
+        except:
+            if verbose: print("All sharing methods failed.")
+
+def share_topology_group(bodies, do_imprint=False, imprint_tol_mm=None, verbose=True):
+    """
+    bodies: list of Body objects (e.g. [c1, c2, core])
+    do_imprint: if True, run Imprint/Share on the whole set at once
+    imprint_tol_mm: optional imprint tolerance in mm (e.g. 0.005)
+    """
+    bodies = [b for b in bodies if b is not None]
+    if len(bodies) < 2:
+        return
+
+    # 1) Set SharedTopology (best effort) on the *container* of these bodies.
+    # NOTE: your existing code uses body_a.Parent; that's often not the right level.
+    # We’ll keep it minimal: try each body's parent.
+    try:
+        for b in bodies:
+            comp = getattr(b, "Parent", None)
+            if comp is not None and hasattr(comp, "SharedTopology"):
+                comp.SharedTopology = SharedTopology.Share
+        if verbose: print("SharedTopology set to Share on parent(s) (best effort).")
+    except Exception as e:
+        if verbose: print("Failed setting SharedTopology:", e)
+
+    if not do_imprint:
+        return
+
+    # 2) Imprint once on ALL bodies
+    selection = BodySelection.Create(bodies)
+    try:
+        opts = ImprintOptions()
+        if imprint_tol_mm is not None and hasattr(opts, "Tolerance"):
+            opts.Tolerance = MM(imprint_tol_mm)
+        Imprint.Execute(selection, opts)
+        if verbose: print("Imprint successful on group of", len(bodies), "bodies.")
+        return
+    except Exception as e_imprint:
+        if verbose: print("Imprint failed:", e_imprint)
+
+    # 3) Fallback: Repair > Share once on ALL bodies
+    try:
+        Share.Share(selection)
+        if verbose: print("Repair.Share successful on group.")
+    except Exception as e_share:
+        if verbose: print("Repair.Share failed:", e_share)
+
+
+# conductor ↔ core
+# conductor ↔ core
+#if core_mode != "merged":
+#    share_topology_pair(c1, score1)
+#    share_topology_pair(c2, score2)
+#else:
+    # merged core: both conductors touch the merged core
+#  share_topology_pair(c1, score)
+#  share_topology_pair(c2, score)
+
+# Share core ↔ second extrusion
+#if core_mode != "merged":
+#    safe_share(score1, second_extrusion)
+#    safe_share(score2, second_extrusion)
+#else:
+#    safe_share(score, second_extrusion)  # or core_merged
+
+
+# AFTER all relevant bodies exist and are final (including merged core case)
+# Use share_only for HFSS cleanliness
+if core_mode != "merged":
+    share_topology_pair(c1, score1, mode="share_only", verbose=True)
+    share_topology_pair(c2, score2, mode="share_only", verbose=True)
+    share_topology_pair(score1, second_extrusion, mode="share_only", verbose=True)
+    share_topology_pair(score2, second_extrusion, mode="share_only", verbose=True)
+else:
+    #share_topology_pair(c1, score, mode="share_only", verbose=True)
+    #share_topology_pair(c2, score, mode="share_only", verbose=True)
+    share_topology_group([c1, c2, score])
+    share_topology_pair(score, second_extrusion, mode="share_only", verbose=True)
 
 # -----------------------------
 # Parameters (derived defaults)
