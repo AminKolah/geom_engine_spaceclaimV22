@@ -1,31 +1,22 @@
 # Python Script, API Version = V252
-
-
 import math
-
 from SpaceClaim.Api.V252 import *
-
 from SpaceClaim.Api.V252.Geometry import *
-
 from SpaceClaim.Api.V252.Modeler import *
 
 ClearAll()
 
-
 # -----------------------------
-
 # 1. PARAMETERS / INPUTS
-
 # -----------------------------
 
 def get_param(name, default_val):
-
     try: return float(Parameters[name])
-
     except: return default_val
 
 
 run_benchmark_rig = False  # Set to True to enable 3-point rig creation
+run_stiffness = True  # set False to silence
 
 # Logic options using the Parameters check pattern
 
@@ -1132,56 +1123,6 @@ def body_volume_mm3(body):
     return None
 
 
-def delete_zero_volume_bodies_in_component(comp_name, vol_tol=1e-6, verbose=True):
-    """
-    Deletes bodies in the given component whose volume <= vol_tol.
-    Also prints a volume report for later use.
-    """
-
-    comp = _comp_by_name(comp_name)
-    if comp is None:
-        print("Component not found:", comp_name)
-        return []
-
-    bodies = list(comp.Content.Bodies)
-    if not bodies:
-        print("No bodies found in component:", comp_name)
-        return []
-
-    report = []
-    victims = []
-    unknown = []
-
-    for b in bodies:
-        v = body_volume_mm3(b)
-        nm = getattr(b, "Name", "<?>")
-
-        if v is None:
-            unknown.append(b)
-            if verbose:
-                print("VOL=??   ", nm, "(could not compute)")
-            continue
-
-        report.append((nm, v))
-        if verbose:
-            print("VOL=%g  %s" % (v, nm))
-
-        if abs(v) <= vol_tol:
-            victims.append(b)
-
-    if victims:
-        Delete.Execute(BodySelection.Create(victims))
-        print("Deleted %d zero-volume bodies (tol=%g) from %s" % (len(victims), vol_tol, comp_name))
-    else:
-        print("No zero-volume bodies found (tol=%g) in %s" % (vol_tol, comp_name))
-
-    if unknown:
-        print("WARNING: %d bodies had unknown volume (not deleted)." % len(unknown))
-
-    # Return volume report sorted by absolute volume (useful later)
-    report_sorted = sorted(report, key=lambda t: abs(t[1]))
-    return report_sorted
-
 def move_all_root_bodies_to_component(comp_name):
 
     # 1. Get all bodies currently in the Root
@@ -1481,7 +1422,6 @@ def _safe_Name(obj):
 
     return "<UnknownObject>"
 
-
 def _get_parent_component_or_part(body):
     """
     In SpaceClaim, body.Parent is often a Component (or Part/RootPart-ish depending on context).
@@ -1688,37 +1628,188 @@ def share_topology_group(bodies, do_imprint=False, imprint_tol_mm=None, verbose=
     except Exception as e_share:
         if verbose: print("Repair.Share failed:", e_share)
 
-
-# conductor ↔ core
-# conductor ↔ core
-#if core_mode != "merged":
-#    share_topology_pair(c1, score1)
-#    share_topology_pair(c2, score2)
-#else:
-    # merged core: both conductors touch the merged core
-#  share_topology_pair(c1, score)
-#  share_topology_pair(c2, score)
-
-# Share core ↔ second extrusion
-#if core_mode != "merged":
-#    safe_share(score1, second_extrusion)
-#    safe_share(score2, second_extrusion)
-#else:
-#    safe_share(score, second_extrusion)  # or core_merged
-
-
 # AFTER all relevant bodies exist and are final (including merged core case)
 # Use share_only for HFSS cleanliness
+
 if core_mode != "merged":
     share_topology_pair(c1, score1, mode="share_only", verbose=True)
     share_topology_pair(c2, score2, mode="share_only", verbose=True)
     share_topology_pair(score1, second_extrusion, mode="share_only", verbose=True)
     share_topology_pair(score2, second_extrusion, mode="share_only", verbose=True)
 else:
-    #share_topology_pair(c1, score, mode="share_only", verbose=True)
-    #share_topology_pair(c2, score, mode="share_only", verbose=True)
     share_topology_group([c1, c2, score])
     share_topology_pair(score, second_extrusion, mode="share_only", verbose=True)
+
+# ---------------- vector helpers ----------------
+
+def _dot(u, v): return u.X*v.X + u.Y*v.Y + u.Z*v.Z
+def _norm(u): return math.sqrt(_dot(u,u))
+def _scale(u, s): return Direction.Create(u.X*s, u.Y*s, u.Z*s)
+def _sub(a, b): return Direction.Create(a.X-b.X, a.Y-b.Y, a.Z-b.Z)
+
+def _unit(u):
+    m = _norm(u)
+    if m == 0: return Direction.Create(0,0,0)
+    return Direction.Create(u.X/m, u.Y/m, u.Z/m)
+
+def _reject(u, axis_unit):
+    # remove component along axis
+    return _sub(u, _scale(axis_unit, _dot(u, axis_unit)))
+
+def _zero_z(u):  # keep XY only
+    return Direction.Create(u.X, u.Y, 0.0)
+
+# ---------------- API-dependent shims ----------------
+
+
+def _face_point(face):
+    """
+    Return a representative point on the face using parameter evaluation 
+    or bounding box center for SpaceClaim 252.
+    """
+    try:
+        # 1. Attempt to get a point at the middle of the UV domain
+        # This is the most 'representative' point on the actual surface
+        domain = face.Geometry.Domain
+        mid_u = (domain.RangeU.Start + domain.RangeU.End) / 2.0
+        mid_v = (domain.RangeV.Start + domain.RangeV.End) / 2.0
+        
+        # Evaluate returns a FaceEvaluation object containing the Point
+        return face.Geometry.Evaluate(Point2D.Create(mid_u, mid_v)).Point
+    except:
+        try:
+            # 2. Fallback: Bounding box center (requires Matrix.Identity in V252)
+            # Access the underlying Modeler Face for the BoundingBox
+            return face.Shape.GetBoundingBox(Matrix.Identity).Center
+        except:
+            # 3. Last resort: The position of the first vertex
+            return list(face.Vertices)[0].Position
+
+def _face_normal(face, point):
+    """
+    Evaluates the normal of the face at the point closest to 'point'.
+    """
+    # 1. Access the Modeler Face through .Shape
+    modeler_face = face.Shape 
+    
+    # 2. Use Geometry.ProjectPoint on the Modeler object
+    # This finds the closest point on the surface to your input 'point'
+    result = modeler_face.Geometry.ProjectPoint(point)
+    
+    # 3. Return the Normal vector at that projected location
+    return result.Normal
+
+def _get_body_by_exact_name(name):
+    """Helper to refetch a body from the root if a pointer dies."""
+    for b in GetRootPart().Bodies:
+        if b.Name == name: return b
+    return None
+
+def is_valid(obj):
+    """
+    Checks if a SpaceClaim object is still 'alive' in the database.
+    """
+    if obj is None:
+        return False
+    # 1. Check the .IsDisposed property (Standard for .NET-based APIs)
+    try:
+        if obj.IsDisposed:
+            return False
+    except:
+        pass
+    
+    # 2. Verify it still has a parent (if it's a body, it should be in a Part)
+    try:
+        if obj.Parent is None:
+            return False
+    except:
+        return False
+        
+    return True
+
+def get_live_body(body_ref):
+    """
+    Returns the live version of a body. If the reference is dead,
+    it tries to find it by name in the Root Part.
+    """
+    if is_valid(body_ref):
+        return body_ref
+    
+    # If the pointer is dead, refetch by name
+    name_to_find = getattr(body_ref, "Name", None)
+    if name_to_find:
+        for b in GetRootPart().Bodies:
+            if b.Name == name_to_find:
+                return b
+                
+    return None
+
+def body_xy_center_from_bbox(body):
+    # Ensure we have a valid reference
+    live_body = get_live_body(body)
+    if live_body is None:
+        raise Exception("Cannot find center: Body reference is dead/deleted.")
+
+    # Access the shape safely
+    shape = live_body.Shape
+    bbox = shape.GetBoundingBox(Matrix.Identity)
+    center_pt = bbox.Center
+    return Direction.Create(center_pt.X, center_pt.Y, 0.0)
+
+
+def _create_named_selection_from_faces(faces, ns_name):
+    # Use the logic that worked in your previous scripts
+    _delete_named_selection_if_exists(ns_name)
+    sel = FaceSelection.Create(faces)
+    res = NamedSelection.Create(sel, Selection.Empty())
+    if res.CreatedNamedSelection:
+        res.CreatedNamedSelection.SetName(ns_name)
+
+# ---------------- main logic ----------------
+
+def create_layer_side_ns_by_normal(layer_body, ns_outer, ns_inner=None,
+                                    axis="Z", endcap_cos=0.9, area_min=0.0):
+    
+    axis_unit = {"X": Direction.DirX, "Y": Direction.DirY, "Z": Direction.DirZ}[axis]
+    axis_unit = _unit(axis_unit)
+
+    # Get center for the radial test
+    c_xy = body_xy_center_from_bbox(layer_body)
+    
+    outer_faces = []
+    inner_faces = []
+
+    for f in list(layer_body.Faces):
+        if area_min > 0.0 and f.Area < area_min:
+            continue
+
+        p = _face_point(f)
+        n = _face_normal(f, p)
+        
+        # 1. Exclude end caps (faces parallel to the Z-axis)
+        if abs(_dot(n, axis_unit)) > endcap_cos:
+            continue
+
+        # 2. Radial test: compare normal vector (n) with position vector (r)
+        # r = vector from cable center to face point
+        pdir = Direction.Create(p.X, p.Y, p.Z)
+        r = _zero_z(_sub(pdir, c_xy))
+        
+        # If normal points in same direction as radial vector, it's an OUTER face
+        if _dot(n, r) >= 0:
+            outer_faces.append(f)
+        else:
+            inner_faces.append(f)
+
+    if outer_faces:
+        _create_named_selection_from_faces(outer_faces, ns_outer)
+    
+    if ns_inner and inner_faces:
+        _create_named_selection_from_faces(inner_faces, ns_inner)
+
+    return outer_faces, inner_faces
+
+
 
 # -----------------------------
 # Parameters (derived defaults)
@@ -1744,8 +1835,8 @@ def create_loading_nose(mode):
 
     if mode == "good_3point":
         # Good: nose above (+Y), sketch on YZ@x, extrude along X
-        cable_top_y = 0.5 * (H_outer + 2.0*t_overwrap)
-        y_center = cable_top_y + Initial_Gap + r
+        cable_bot_y = - 0.5 * (H_outer + 2.0*t_overwrap)
+        y_center = cable_bot_y - Initial_Gap - r
 
         set_sketch_plane_yz_at_x(-0.5 * Nose_Length)
         sketch_circle(y_center, z_center, r)
@@ -1758,8 +1849,8 @@ def create_loading_nose(mode):
 
     elif mode == "bad_3point":
         # Bad: nose on side (+X), sketch on ZX@y, extrude along Y
-        cable_top_x = 0.5 * (W_outer + 2.0*t_overwrap + 2.0*D_drain if drain_opt else 0.0)
-        x_center = cable_top_x + Initial_Gap + r
+        cable_bot_x = - 0.5 * (W_outer + 2.0*t_overwrap + (2.0*D_drain if drain_opt else 0.0))
+        x_center = cable_bot_x - Initial_Gap - r
 
         set_sketch_plane_zx_at_y(-0.5 * Nose_Length)
         sketch_circle(z_center, x_center, r)
@@ -1827,6 +1918,27 @@ def create_support_with_doubleD_pocket(name, z_center):
 
     return extrude_largest_face_along_z(name, t_support)
 
+def push_support_to_negative_y(body):
+    W_ow, H_ow = cable_envelope_with_optional_drains()
+    cable_bot_y = -0.5 * H_ow
+    # put support top at cable bottom - gap
+    target_top_y = cable_bot_y - Initial_Gap
+
+    # current support top y (quick estimate via face sample)
+    y_max = None
+    for f in list(body.Faces):
+        try:
+            y = f.Eval(0.5, 0.5).Point.Y
+            y_max = y if (y_max is None or y > y_max) else y_max
+        except:
+            pass
+    if y_max is None:
+        return body
+
+    dy = target_top_y - y_max
+    Move.Translate(Selection.Create(body), Direction.DirY, MM(dy))
+    return body
+
 def create_two_supports(mode):
     z1 = 0.10 * L_extrude
     z2 = 0.90 * L_extrude
@@ -1864,7 +1976,6 @@ def create_two_supports(mode):
         b2 = move_body_to_component_once(s2_tmp, None, rigid_comp, n2)
 
     return b1, b2
-
 # ============================================================
 # 7G) Split support openers (GOOD: ZX@Y=0 keep min Y) (BAD: YZ@X=0 keep min X)
 # ============================================================
@@ -1881,6 +1992,14 @@ def _faces_with_normal_near_dir(faces, dir_vec, tol=0.95):
     return out
 
 def body_representative_y(body):
+    # Prefer bounding box when available (stable)
+    try:
+        bb = body.GetBoundingBox()
+        return float(bb.Min.Y)   # smallest Y is what you want for "bottom"
+    except:
+        pass
+
+    # Fallback to face eval (your old behavior)
     for f in list(body.Faces):
         try:
             return f.Eval(0.5, 0.5).Point.Y
@@ -2183,8 +2302,6 @@ def create_two_pulley_rig():
 #==========================================================
 # RUN PIPELINE
 # ============================================================
-
-
 if run_benchmark_rig:
     mode = bending_mode.lower().strip()
     if mode not in ["good_3point", "bad_3point", "good_2pulleys", "bad_2pulleys"]:
@@ -2201,12 +2318,194 @@ if run_benchmark_rig:
             #s2 = split_by_ZX_faces_keep_bottom(s2, y_cut=0.0, final_name="Rig_Support_2")
             create_ns("Rig_Support_1", s1)
             create_ns("Rig_Support_2", s2)
+            for k in range(1, 10):
+                result = NamedSelection.Delete("Group%d" % k)
         else:
            # s1 = split_by_YZ_faces_keep_bottom(s1, x_cut=0.0, final_name="Rig_Support_1")
            # s2 = split_by_YZ_faces_keep_bottom(s2, x_cut=0.0, final_name="Rig_Support_2")
             create_ns("Rig_Support_1", s1)
             create_ns("Rig_Support_2", s2)
+            for k in range(1, 10):
+                result = NamedSelection.Delete("Group%d" % k)
         # Optional: named selections for supports if you want
     # create_ns(_body_name(s1), s1)
     # create_ns(_body_name(s2), s2)
     # Python Script, API Version = V252
+
+# -----------------------------
+# 5. FACE-LEVEL NAMED SELECTIONS
+# -----------------------------
+def get_body(name):
+    for b in GetRootPart().Bodies:
+        if b.Name == name:
+            return b
+    raise Exception("Body not found: " + name)
+#shield = find_body_anywhere_by_name("Shield")[0]
+#overwrap = find_body_anywhere_by_name("Overwrap")[0]
+#second_extrusion = find_body_anywhere_by_name("Second_Extrusion")[0]
+#create_layer_side_ns_by_normal(shield, "NS_Shield_Outer", "NS_Shield_Inner")
+#create_layer_side_ns_by_normal(overwrap, "NS_Overwrap_Outer", "NS_Overwrap_Inner")
+#create_layer_side_ns_by_normal(second_extrusion, "NS_Second_Extrusion_Outer", "NS_Second_Extrusion_Inner")
+
+
+################# Stiffness Calculations ############################
+
+
+def get_body_stiffness_contribution(body, E_modulus):
+    """
+    Calculates EI contribution using Parallel Axis Theorem.
+    Uses Face properties to ensure 2D cross-section accuracy.
+    """
+    if body is None or not is_valid(body):
+        return 0.0, 0.0
+
+    # Locate the cross-section face (XY plane)
+    target_face = _largest_xy_face(body)
+    if target_face is None:
+        return 0.0, 0.0
+
+    # Get MassProperties of the FACE
+    # In SC API, for a face, 'Mass' often returns the Area
+    face_sel = FaceSelection.Create([target_face])
+    mp = MeasureHelper.GetMassProperties(face_sel)
+    
+    # Robustly handle Area and Centroid from the MP object
+    # If .Area isn't found, .Mass is the fallback for 2D objects
+    try:
+        area = float(mp.Area)
+    except:
+        area = float(mp.Mass) 
+        
+    # Area Centroid (d values for Parallel Axis Theorem)
+    # Distance to Global Y-axis (x displacement) and Global X-axis (y displacement)
+    cx = mp.Centroid.X
+    cy = mp.Centroid.Y
+
+    # Second Moment of Inertia about the face's own centroid
+    # In V252, mp.Inertia returns the Moments of Inertia tensor
+    I_local_x = mp.Inertia.XX
+    I_local_y = mp.Inertia.YY
+
+    # Parallel Axis Theorem: I_global = I_local + (Area * distance^2)
+    # EI_x uses Y-offset (cy); EI_y uses X-offset (cx)
+    I_global_x = I_local_x + (area * (cy**2))
+    I_global_y = I_local_y + (area * (cx**2))
+
+    return E_modulus * I_global_x, E_modulus * I_global_y
+
+def pick_smallest_face(body):
+    faces = []
+    for f in list(body.Faces):
+        try:
+            faces.append((float(f.Area), f))
+        except:
+            pass
+    faces.sort(key=lambda t: t[0])
+    return faces[0][1] if faces else None
+
+
+def calculate_explicit_composite_stiffness(modulus_map):
+    # Define the list of bodies to look for based on your naming convention
+    target_names = [
+        "conductor[1]", 
+        "conductor[2]", 
+        "single_core_merged", 
+        "Second_Extrusion", 
+        "Shield", 
+        "Overwrap"
+    ]
+    
+    # Dynamically include drains based on your parameter
+    if drain_opt:
+        target_names.extend(["drain[1]", "drain[2]"])
+        
+    total_EIx = 0.0
+    total_EIy = 0.0
+    
+    print("\n" + "="*85)
+    print("{:<20} | {:<8} | {:<8} | {:<12} | {:<12}".format(
+        "Body Name", "Area", "CentroidX", "EIx (N-mm2)", "EIy (N-mm2)"))
+    print("-" * 85)
+
+    for name in target_names:
+        # Use your verified search function
+        body, _ = find_body_anywhere_by_name(name)
+        
+        if body is None:
+            continue
+
+        # Match E-modulus (MPa)
+        E_val = 0.0
+        for key, value in modulus_map.items():
+            if key in name:
+                E_val = value
+                break
+        
+        if E_val <= 0:
+            continue
+
+        # --- YOUR VERIFIED FACE PICKING LOGIC ---
+        faces_list = []
+        for f in list(body.Faces):
+            try:
+                faces_list.append((float(f.Area), f))
+            except:
+                pass
+        
+        if not faces_list:
+            continue
+            
+        faces_list.sort(key=lambda t: t[0])
+        face = faces_list[0][1]
+        # ----------------------------------------
+
+        # Extract Physical Properties (V252 Methods)
+        face_sel = Selection.Create(face)
+        centroid_pt = MeasureHelper.GetCentroid(face_sel)
+        mp = MeasureHelper.GetMassProperties(face_sel)
+        
+        # Local Centroidal Frame for Inertia Tensor
+        local_frame = Frame.Create(centroid_pt, Direction.DirX, Direction.DirY)
+        tensor = mp.GetInertiaTensor(local_frame)
+
+        # Scaling: API Meters to your script's MM
+        to_mm = 1000.0
+        area_mm2 = face.Area * 1e6
+        cx_mm = centroid_pt.X * to_mm
+        cy_mm = centroid_pt.Y * to_mm
+        ixx_local = tensor.GetValue(0,0) * 1e12
+        iyy_local = tensor.GetValue(1,1) * 1e12
+
+        # Parallel Axis Theorem: I_global = I_local + (Area * d^2)
+        # Since global center is (0,0), d is simply the centroid coordinates
+        I_global_x = ixx_local + (area_mm2 * (cy_mm**2))
+        I_global_y = iyy_local + (area_mm2 * (cx_mm**2))
+        
+        body_eix = E_val * I_global_x
+        body_eiy = E_val * I_global_y
+        
+        total_EIx += body_eix
+        total_EIy += body_eiy
+        
+        print("{:<20} | {:<8.3f} | {:<8.3f} | {:<12.2e} | {:<12.2e}".format(
+            name, area_mm2, cx_mm, body_eix, body_eiy))
+
+    print("="*85)
+    print("TOTAL COMPOSITE EIx: {:.6e} N-mm2".format(total_EIx))
+    print("TOTAL COMPOSITE EIy: {:.6e} N-mm2".format(total_EIy))
+    return total_EIx, total_EIy
+
+# --- EXECUTION ---
+
+material_moduli = {
+    "conductor": 117000.0,
+    "drain": 117000.0,
+    "Shield": 210000.0,
+    "single_core": 500.0,
+    "Second_Extrusion": 500.0,
+    "Overwrap": 500.0
+}
+
+if run_stiffness:
+    calculate_explicit_composite_stiffness(material_moduli)
+
