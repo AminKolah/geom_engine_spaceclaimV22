@@ -100,6 +100,7 @@ overlap_tol = 0.012  # mm
 
 if (filler_mode == "shell"): 
     D_core = C2C
+    core_mode = "spaced"
 elif (filler_mode == "fill"):
     delta = C2C - D_core
     # snap away from zero-thickness tangency
@@ -748,7 +749,7 @@ if not (is_a_doublet):
                     sketch_circle(hx, hy, r_hole)
 
 
-            # Build Cores
+       # Build Cores
 
        # draw_mirrored_core(-dx_cond, False)
 
@@ -849,7 +850,6 @@ if not (is_a_doublet):
                         SketchLine.Create(p2, p3)                              # Side Wall 1
                         SketchArc.CreateSweepArc(P2(center_x, 0), p3, p4, False) # Outer Arc
                         SketchLine.Create(p4, p1)                              # Side Wall 2
-
 
         # Build Core 1
         if core_mode == "spaced":
@@ -2407,12 +2407,19 @@ def pick_smallest_face(body):
 def calculate_explicit_composite_stiffness(modulus_map):
     # Define the list of bodies to look for based on your naming convention
     target_names = [
-        "conductor[1]", 
-        "conductor[2]", 
-        "single_core_merged", 
-        "Second_Extrusion", 
-        "Shield", 
-        "Overwrap"
+        "conductor[1]",
+        "conductor[2]",
+    ]
+
+    if core_mode == "spaced":
+        target_names += ["single_core[1]", "single_core[2]"]
+    else:
+        target_names += ["single_core_merged"]
+
+    target_names += [
+        "Second_Extrusion",
+        "Shield",
+        "Overwrap",
     ]
     
     # Dynamically include drains based on your parameter
@@ -2498,12 +2505,12 @@ def calculate_explicit_composite_stiffness(modulus_map):
 # --- EXECUTION ---
 
 material_moduli = {
-    "conductor": 117000.0,
-    "drain": 117000.0,
-    "Shield": 210000.0,
+    "conductor": 110000.0,
+    "drain": 110000.0,
+    "Shield": 3000.0,
     "single_core": 500.0,
-    "Second_Extrusion": 500.0,
-    "Overwrap": 500.0
+    "Second_Extrusion": 25.0,
+    "Overwrap": 3650.0
 }
 
 if run_stiffness:
