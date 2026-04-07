@@ -1,3 +1,4 @@
+
 # Python Script, API Version = V252
 import math
 from SpaceClaim.Api.V252 import *
@@ -528,44 +529,6 @@ def share_topology_pair(body_a, body_b, mode="share_only", verbose=True):
             if verbose:
                 print("All sharing methods failed.")
 
-
-
-def share_topology_pair_old(body_a, body_b, verbose=True):
-    if body_a is None or body_b is None:
-        return
-
-    # 1. Set the 'Share Topology' property on the Component
-    # This is what Mechanical 2025 R2 looks at to merge nodes.
-    try:
-        # Get the component containing body_a
-        comp = body_a.Parent
-        if hasattr(comp, 'SharedTopology'):
-            comp.SharedTopology = SharedTopology.Share # Options: Share, Merge, None
-            if verbose: print("Component Property set to 'Share' for:", body_a.Name)
-    except Exception as e:
-        if verbose: print("Failed to set SharedTopology property:", e)
-
-    # 2. Physical Imprint (The 'Repair' way)
-    # This physically creates the edges where bodies touch.
-    try:
-        selection = BodySelection.Create([body_a, body_b])
-        # In 252, Imprint is often found in the 'Repair' namespace or via the 'PowerSelect'
-        # This is the most stable 252 command for imprinting
-        options = ImprintOptions()
-        # You can set options.Tolerance = MM(0.01) if needed
-        Imprint.Execute(selection, options)
-        
-        if verbose: print("Physical Imprint successful between:", body_a.Name, "and", body_b.Name)
-    except Exception as e_imprint:
-        if verbose: print("Physical Imprint failed:", e_imprint)
-        
-        # Final Fallback: The 'Share' tool in the Repair tab
-        try:
-            Share.Share(selection) # This is the 2025 R2 'Share' button logic
-            if verbose: print("Repair.Share successful.")
-        except:
-            if verbose: print("All sharing methods failed.")
-
 def _largest_xy_face(body):
     best = None
     bestA = -1.0
@@ -581,192 +544,12 @@ def _largest_xy_face(body):
             pass
     return best
 
-def extrude_and_name_multilumen(name, length_mm, mode="largest"):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-
-    if not new_bodies:
-        try:
-            crvs = list(root.Curves)
-            if not crvs:
-                raise Exception("No sketch curves found to Fill for '%s'." % name)
-            Fill.Execute(CurveSelection.Create(crvs))
-        except Exception as e:
-            raise Exception("Solidify produced NO sketch-fill body for '%s' and Fill failed: %s" % (name, e))
-
-        after2 = list(root.Bodies)
-        new_bodies = [b for b in after2 if b not in before]
-        if not new_bodies:
-            raise Exception("Solidify+Fill produced NO sketch-fill body for '%s'." % name)
-
-    def best_xy_area(b):
-        f = _largest_xy_face(b)
-        if f is None:
-            try:
-                f = max(list(b.Faces), key=lambda ff: ff.Area)
-            except:
-                return -1.0
-        try:
-            return float(f.Area)
-        except:
-            return -1.0
-
-    if mode == "largest":
-        temp_body = max(new_bodies, key=best_xy_area)
-    elif mode == "last":
-        temp_body = new_bodies[-1]
-    elif mode == "smallest":
-        temp_body = min(new_bodies, key=best_xy_area)
-    else:
-        raise Exception("Unknown extrude mode: %s" % mode)
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    try:
-        clear_all_sketch_curves()
-    except:
-        pass
-
-    return new_body
-
 
 def area_doubleD(W, H):
     R = H / 2.0
     dx = (W - H) / 2.0
     return 4.0 * dx * R + math.pi * R * R
 
-
-def extrude_shell_by_area(name, length_mm, expected_area):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-
-    if not new_bodies:
-        crvs = list(root.Curves)
-        if not crvs:
-            raise Exception("No sketch curves found for '%s'." % name)
-        Fill.Execute(CurveSelection.Create(crvs))
-        after = list(root.Bodies)
-        new_bodies = [b for b in after if b not in before]
-        if not new_bodies:
-            raise Exception("No sketch-fill body created for '%s'." % name)
-
-    def xy_area(b):
-        f = _largest_xy_face(b)
-        if f is None:
-            try:
-                f = max(list(b.Faces), key=lambda ff: ff.Area)
-            except:
-                return -1.0
-        try:
-            return float(f.Area)
-        except:
-            return -1.0
-
-    temp_body = min(new_bodies, key=lambda b: abs(xy_area(b) - expected_area))
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    try:
-        clear_all_sketch_curves()
-    except:
-        pass
-
-    return new_body
-
-def extrude_and_name_issue(name, length_mm, pick_largest=False):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-    if not new_bodies:
-        raise Exception("Solidify produced NO sketch-fill body for '%s'." % name)
-
-    # Choose the sketch-fill body whose XY face has the largest area
-    def best_xy_area(b):
-        f = _largest_xy_face(b)
-        if f is None:
-            try:
-                f = max(list(b.Faces), key=lambda ff: ff.Area)
-            except:
-                return -1.0
-        try:
-            return float(f.Area)
-        except:
-            return -1.0
-
-    temp_body = max(new_bodies, key=best_xy_area)
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    # OPTIONAL: clean up all sketch-fill bodies (prevents clutter & accidental reuse)
-   # try:
-   #     Delete.Execute(BodySelection.Create(new_bodies))
-   # except:
-        #pass
-
-    return new_body
 
 def extrude_and_name(name, length_mm, pick_largest=True):
     root = GetRootPart()
@@ -836,171 +619,6 @@ def extrude_and_name(name, length_mm, pick_largest=True):
 
     return new_body
 
-def extrude_and_name_fill(name, length_mm, pick_largest=False):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    # Try the old behavior first
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-
-    # ---- MINIMAL FIX: fallback to explicit Fill if "Solidify" didn't create sketch-fill ----
-    if not new_bodies:
-            # ---- V252 Fill needs an explicit edge/curve selection ----
-            try:
-                crvs = list(root.Curves)  # current sketch curves in the root
-                if not crvs:
-                    raise Exception("No sketch curves found to Fill for '%s'." % name)
-
-                Fill.Execute(CurveSelection.Create(crvs))
-            except Exception as e:
-                raise Exception("Solidify produced NO sketch-fill body for '%s' and Fill failed: %s" % (name, e))
-
-            after2 = list(root.Bodies)
-            new_bodies = [b for b in after2 if b not in before]
-            if not new_bodies:
-                raise Exception("Solidify+Fill produced NO sketch-fill body for '%s' (profile likely not closed)." % name)
-    # Choose the sketch-fill body whose XY face has the largest area
-    def best_xy_area(b):
-        f = _largest_xy_face(b)
-        if f is None:
-            try:
-                f = max(list(b.Faces), key=lambda ff: ff.Area)
-            except:
-                return -1.0
-        try:
-            return float(f.Area)
-        except:
-            return -1.0
-
-    #temp_body = max(new_bodies, key=best_xy_area)
-    temp_body = new_bodies[-1]
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    # Clean up sketch-fill bodies
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    return new_body
-
-def extrude_and_name3(name, length_mm, pick_largest=False):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-    if not new_bodies:
-        raise Exception("Solidify produced NO sketch-fill body for '%s'." % name)
-
-    # Choose the sketch-fill body whose XY face has the largest area
-    def best_xy_area(b):
-        f = _largest_xy_face(b)
-        if f is None:
-            try:
-                f = max(list(b.Faces), key=lambda ff: ff.Area)
-            except:
-                return -1.0
-        try:
-            return float(f.Area)
-        except:
-            return -1.0
-
-    temp_body = max(new_bodies, key=best_xy_area)
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    # OPTIONAL: clean up all sketch-fill bodies (prevents clutter & accidental reuse)
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    return new_body
-
-
-def extrude_and_name_old2(name, length_mm, pick_largest=False):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-
-    if not new_bodies:
-        raise Exception(
-            "Solidify produced NO sketch-fill body for '%s'. "
-            "Profile is likely not closed (tiny gap/overlap), or multiple regions." % name
-        )
-
-    temp_body = new_bodies[-1]
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s' (wrong face or invalid profile)." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-    return new_body
-
-
-def extrude_and_name_old(name, length_mm, pick_largest=False):
-    solidify_sketch()
-    temp_body = GetRootPart().Bodies[-1]
-
-    face = _largest_xy_face(temp_body)
-    if face is None:
-        # fallback
-        face = max(list(temp_body.Faces), key=lambda f: f.Area)
-
-    options = ExtrudeFaceOptions()
-    options.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), options)
-
-    new_body = list(res.CreatedBodies)[0]
-    new_body.SetName(name)
-    return new_body
 
 def _get_named_selection_by_name(ns_name):
     try:
@@ -1084,6 +702,130 @@ def union_bodies(name, bodies):
     # If we got here, union failed
     raise Exception("Union failed. Bodies may not intersect/touch, or are invalid (sheet, separate components, etc.).")
 
+
+def _face_bbox_xy(face):
+    bb = face.Shape.GetBoundingBox(Matrix.Identity)
+    xmin = float(bb.MinPoint.X)
+    xmax = float(bb.MaxPoint.X)
+    ymin = float(bb.MinPoint.Y)
+    ymax = float(bb.MaxPoint.Y)
+    return xmin, xmax, ymin, ymax
+
+def _bbox_contains_xy(face, x, y, tol=1e-6):
+    xmin, xmax, ymin, ymax = _face_bbox_xy(face)
+    return (xmin - tol <= x <= xmax + tol) and (ymin - tol <= y <= ymax + tol)
+
+def _safe_box_xy_info(box):
+    """
+    Robust XY bbox extraction across SpaceClaim builds.
+    Returns (cx, cy, xmin, xmax, ymin, ymax) or raises.
+    """
+    cx = float(box.Center.X)
+    cy = float(box.Center.Y)
+
+    # Try common bounding-box APIs
+    if hasattr(box, "MaxPoint") and hasattr(box, "MinPoint"):
+        xmin = float(box.MinPoint.X)
+        xmax = float(box.MaxPoint.X)
+        ymin = float(box.MinPoint.Y)
+        ymax = float(box.MaxPoint.Y)
+        return cx, cy, xmin, xmax, ymin, ymax
+
+    if hasattr(box, "MaxCorner") and hasattr(box, "MinCorner"):
+        xmin = float(box.MinCorner.X)
+        xmax = float(box.MaxCorner.X)
+        ymin = float(box.MinCorner.Y)
+        ymax = float(box.MaxCorner.Y)
+        return cx, cy, xmin, xmax, ymin, ymax
+
+    if hasattr(box, "Size"):
+        sx = float(box.Size.X) * 0.5
+        sy = float(box.Size.Y) * 0.5
+        xmin = cx - sx
+        xmax = cx + sx
+        ymin = cy - sy
+        ymax = cy + sy
+        return cx, cy, xmin, xmax, ymin, ymax
+
+    if hasattr(box, "Extents"):
+        sx = float(box.Extents.X)
+        sy = float(box.Extents.Y)
+        xmin = cx - sx
+        xmax = cx + sx
+        ymin = cy - sy
+        ymax = cy + sy
+        return cx, cy, xmin, xmax, ymin, ymax
+
+    raise Exception("Unsupported Box API: no MaxPoint/MinPoint, MaxCorner/MinCorner, Size, or Extents")
+
+def extrude_from_explicit_curves(name, length_mm, curves):
+    root = GetRootPart()
+    before = list(root.Bodies)
+
+    if not curves:
+        raise Exception("No curves provided for '%s'." % name)
+
+    Fill.Execute(CurveSelection.Create(curves))
+
+    after = list(root.Bodies)
+    new_bodies = [b for b in after if b not in before]
+
+    if not new_bodies:
+        raise Exception("Explicit Fill created no body for '%s'." % name)
+
+    # pick the intended face from these sheet bodies
+    body = new_bodies[-1]
+    faces = list(body.Faces)
+    if not faces:
+        raise Exception("Filled body for '%s' has no faces." % name)
+
+    face = max(faces, key=lambda f: f.Area)   # replace later if needed
+
+    opts = ExtrudeFaceOptions()
+    opts.ExtrudeType = ExtrudeType.ForceIndependent
+    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), opts)
+
+    created = list(res.CreatedBodies)
+    if not created:
+        raise Exception("Extrude produced no result for '%s'." % name)
+
+    new_body = created[0]
+    new_body.SetName(name)
+
+    # IMPORTANT: delete temporary sheet-fill bodies
+    try:
+        Delete.Execute(BodySelection.Create(new_bodies))
+    except:
+        pass
+
+    # OPTIONAL: clear sketch curves too
+    try:
+        clear_all_sketch_curves()
+    except:
+        pass
+
+    # IMPORTANT: return to solid/display mode
+    try:
+        ViewHelper.SetViewMode(InteractionMode.Solid)
+    except:
+        pass
+
+    return new_body
+
+def find_body_by_name(name):
+    root = GetRootPart()
+    for b in list(root.Bodies):
+        if getattr(b, "Name", "") == name:
+            return b
+    for comp in list(root.Components):
+        try:
+            for b in list(comp.Content.Bodies):
+                if getattr(b, "Name", "") == name:
+                    return b
+        except:
+            pass
+    return None
+# -----------------------------
 
 def create_ns(name, body_or_list):
     """Creates a Named Selection in the Groups tab for ANSYS Mechanical (idempotent)."""
@@ -1221,20 +963,7 @@ def split_by_yz_plane_face(body, x_cut=0.0, left_name="LEFT", right_name="RIGHT"
 ######################################################################
 
 # 3. BUILD GEOMETRY
-def find_body_by_name(name):
-    root = GetRootPart()
-    for b in list(root.Bodies):
-        if getattr(b, "Name", "") == name:
-            return b
-    for comp in list(root.Components):
-        try:
-            for b in list(comp.Content.Bodies):
-                if getattr(b, "Name", "") == name:
-                    return b
-        except:
-            pass
-    return None
-# -----------------------------
+
 # (1) Conductors
 
 
@@ -1252,9 +981,6 @@ if c2 is None:
     clear_all_sketch_curves()   # see below
     sketch_circle(dx_cond, 0, r_cond)
     c2 = extrude_and_name("conductor[2]", L_extrude)
-
-
-
 
 # (2) Cores (Insulation)
 
@@ -1310,7 +1036,6 @@ if not (is_a_doublet):
 
                     hy = rp * math.sin(angle)
                     sketch_circle(hx, hy, r_hole)
-
 
        # Build Cores
        # draw_mirrored_core(-dx_cond, False)
@@ -1524,242 +1249,11 @@ elif filler_mode == "shell":
     H_fill_inner = H_in - 2.0 * t_filler_shell
     R_fill_inner = R_in - t_filler_shell
 
-    
-
     if H_fill_inner > 0:
         sketch_profile(dx_in, R_fill_inner, W_fill_inner, H_fill_inner)
 
-    #sketch_circle(-dx_cond, 0, r_core)
-    #sketch_circle(dx_cond, 0, r_core)
     second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
     #create_ns("Second_Extrusion", second_extrusion)
-
-
-
-
-def _face_bbox_xy(face):
-    bb = face.Shape.GetBoundingBox(Matrix.Identity)
-    xmin = float(bb.MinPoint.X)
-    xmax = float(bb.MaxPoint.X)
-    ymin = float(bb.MinPoint.Y)
-    ymax = float(bb.MaxPoint.Y)
-    return xmin, xmax, ymin, ymax
-
-def _bbox_contains_xy(face, x, y, tol=1e-6):
-    xmin, xmax, ymin, ymax = _face_bbox_xy(face)
-    return (xmin - tol <= x <= xmax + tol) and (ymin - tol <= y <= ymax + tol)
-
-def _safe_box_xy_info(box):
-    """
-    Robust XY bbox extraction across SpaceClaim builds.
-    Returns (cx, cy, xmin, xmax, ymin, ymax) or raises.
-    """
-    cx = float(box.Center.X)
-    cy = float(box.Center.Y)
-
-    # Try common bounding-box APIs
-    if hasattr(box, "MaxPoint") and hasattr(box, "MinPoint"):
-        xmin = float(box.MinPoint.X)
-        xmax = float(box.MaxPoint.X)
-        ymin = float(box.MinPoint.Y)
-        ymax = float(box.MaxPoint.Y)
-        return cx, cy, xmin, xmax, ymin, ymax
-
-    if hasattr(box, "MaxCorner") and hasattr(box, "MinCorner"):
-        xmin = float(box.MinCorner.X)
-        xmax = float(box.MaxCorner.X)
-        ymin = float(box.MinCorner.Y)
-        ymax = float(box.MaxCorner.Y)
-        return cx, cy, xmin, xmax, ymin, ymax
-
-    if hasattr(box, "Size"):
-        sx = float(box.Size.X) * 0.5
-        sy = float(box.Size.Y) * 0.5
-        xmin = cx - sx
-        xmax = cx + sx
-        ymin = cy - sy
-        ymax = cy + sy
-        return cx, cy, xmin, xmax, ymin, ymax
-
-    if hasattr(box, "Extents"):
-        sx = float(box.Extents.X)
-        sy = float(box.Extents.Y)
-        xmin = cx - sx
-        xmax = cx + sx
-        ymin = cy - sy
-        ymax = cy + sy
-        return cx, cy, xmin, xmax, ymin, ymax
-
-    raise Exception("Unsupported Box API: no MaxPoint/MinPoint, MaxCorner/MinCorner, Size, or Extents")
-
-
-def extrude_region_by_probe(name, length_mm, x_probe, y_probe):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    print("\n==============================")
-    print("extrude_region_by_probe:", name)
-    print("==============================")
-    print("Input probe (mm): x=%.6f y=%.6f" % (x_probe, y_probe))
-
-    xp = float(MM(x_probe))
-    yp = float(MM(y_probe))
-    print("Probe after MM(): x=%.6f y=%.6f" % (xp, yp))
-
-    solidify_sketch()
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-    print("Number of new bodies:", len(new_bodies))
-
-    if not new_bodies:
-        crvs = list(root.Curves)
-        if not crvs:
-            raise Exception("No sketch curves found for '%s'." % name)
-        Fill.Execute(CurveSelection.Create(crvs))
-        after = list(root.Bodies)
-        new_bodies = [b for b in after if b not in before]
-        print("After Fill, new bodies:", len(new_bodies))
-        if not new_bodies:
-            raise Exception("No sketch-fill body created for '%s'." % name)
-
-    # Since your debug showed only 1 new body, inspect faces on that body
-    body = new_bodies[-1]
-    faces = list(body.Faces)
-    if not faces:
-        raise Exception("New body for '%s' has no faces." % name)
-
-    chosen_face = None
-    best_dist2 = 1.0e99
-
-    print("\n--- Candidate Faces on single new body ---")
-    for i, f in enumerate(faces):
-        try:
-            # Prefer XY-ish faces
-            try:
-                n = f.Plane.Normal
-                nz = abs(float(n.Z))
-            except:
-                nz = -1.0
-
-            bb = f.Shape.GetBoundingBox(Matrix.Identity)
-            cx, cy, xmin, xmax, ymin, ymax = _safe_box_xy_info(bb)
-            A = float(f.Area)
-
-            contains = (xmin <= xp <= xmax and ymin <= yp <= ymax)
-            dist2 = (cx - xp)**2 + (cy - yp)**2
-
-            print("Face #%d" % i)
-            print("  area       = %.9f" % A)
-            print("  |normal.Z| = %.6f" % nz)
-            print("  center     = (%.9f, %.9f)" % (cx, cy))
-            print("  bounds     = x:[%.9f, %.9f] y:[%.9f, %.9f]" % (xmin, xmax, ymin, ymax))
-            print("  contains probe? ", contains)
-            print("  dist^2 to probe = %.12f" % dist2)
-
-            # First preference: face containing the probe and lying in XY plane
-            if contains and nz > 0.95:
-                chosen_face = f
-                print("  >>> SELECTED (contains probe + XY face) <<<")
-                break
-
-            # Fallback: nearest XY face center to probe
-            if nz > 0.95 and dist2 < best_dist2:
-                best_dist2 = dist2
-                chosen_face = f
-
-        except Exception as e:
-            print("Face #%d FAILED to inspect: %s" % (i, e))
-
-    if chosen_face is None:
-        raise Exception(
-            "Could not find target face for '%s' at probe point (%.4f, %.4f)."
-            % (name, x_probe, y_probe)
-        )
-
-    print("\n✅ Face selected. Proceeding to extrusion...")
-
-    opts = ExtrudeFaceOptions()
-    opts.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(
-        FaceSelection.Create(chosen_face),
-        Direction.DirZ,
-        MM(length_mm),
-        opts
-    )
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    try:
-        clear_all_sketch_curves()
-    except:
-        pass
-
-    return new_body
-
-def extrude_from_explicit_curves(name, length_mm, curves):
-    root = GetRootPart()
-    before = list(root.Bodies)
-
-    if not curves:
-        raise Exception("No curves provided for '%s'." % name)
-
-    Fill.Execute(CurveSelection.Create(curves))
-
-    after = list(root.Bodies)
-    new_bodies = [b for b in after if b not in before]
-
-    if not new_bodies:
-        raise Exception("Explicit Fill created no body for '%s'." % name)
-
-    # pick the intended face from these sheet bodies
-    body = new_bodies[-1]
-    faces = list(body.Faces)
-    if not faces:
-        raise Exception("Filled body for '%s' has no faces." % name)
-
-    face = max(faces, key=lambda f: f.Area)   # replace later if needed
-
-    opts = ExtrudeFaceOptions()
-    opts.ExtrudeType = ExtrudeType.ForceIndependent
-    res = ExtrudeFaces.Execute(FaceSelection.Create(face), Direction.DirZ, MM(length_mm), opts)
-
-    created = list(res.CreatedBodies)
-    if not created:
-        raise Exception("Extrude produced no result for '%s'." % name)
-
-    new_body = created[0]
-    new_body.SetName(name)
-
-    # IMPORTANT: delete temporary sheet-fill bodies
-    try:
-        Delete.Execute(BodySelection.Create(new_bodies))
-    except:
-        pass
-
-    # OPTIONAL: clear sketch curves too
-    try:
-        clear_all_sketch_curves()
-    except:
-        pass
-
-    # IMPORTANT: return to solid/display mode
-    try:
-        ViewHelper.SetViewMode(InteractionMode.Solid)
-    except:
-        pass
-
-    return new_body
 
 # (4) Shield
 print("Shield params: W_outer=%.4f H_outer=%.4f dx_shield=%.4f R_shield=%.4f"
@@ -1774,13 +1268,11 @@ if shield is None:
     if shield_outer is None:
         set_sketch_plane_xy()
         clear_all_sketch_curves()
-
         outer_curves = sketch_profile(dx_shield, R_shield, W_outer, H_outer)
         shield_outer = extrude_from_explicit_curves("Shield_outer_tmp", L_extrude, outer_curves)
     if shield_inner is None:
         set_sketch_plane_xy()
         clear_all_sketch_curves()
-
         inner_curves = sketch_profile(dx_in, R_in, W_in, H_in)
         shield_inner = extrude_from_explicit_curves("Shield_inner_tmp", L_extrude, inner_curves)
 
@@ -1808,25 +1300,25 @@ if shield is None:
         pass
 
 
-# (5) Drains
+# (5) and (6) Drains & Overwrap
 x_drain = dx_shield + R_shield + r_drain
 if drain_opt:
     drain1 = find_body_by_name("drain[1]")
-    drain2 = find_body_by_name("drain[2]")
+    
     if drain1 is None:
         set_sketch_plane_xy()
+        clear_all_sketch_curves()
         sketch_circle(-x_drain, 0, r_drain)
         drain1 = extrude_and_name("drain[1]", L_extrude)
         #create_ns("drain[1]", drain1)
+    drain2 = find_body_by_name("drain[2]")
     if drain2 is None:
         set_sketch_plane_xy()
+        clear_all_sketch_curves()
         sketch_circle(x_drain, 0, r_drain)
         drain2 = extrude_and_name("drain[2]", L_extrude)
         #create_ns("drain[2]", drain2)
-
-
-# (6) Overwrap
-if drain_opt:
+        
     # Existing drain-wrap logic relies on Double-D tangency; 
     # This remains as previously defined
     #set_sketch_plane_xy()
@@ -1834,42 +1326,46 @@ if drain_opt:
     #sketch_wrap_loop_with_drains(t_overwrap)
     #overwrap = extrude_and_name("Overwrap", L_extrude, False)
     overwrap = find_body_by_name("Overwrap")
-    overwrap_outer = find_body_by_name("Overwrap_outer_tmp")
-    overwrap_inner = find_body_by_name("Overwrap_inner_tmp")
-    
-    if overwrap_outer is None:
-        set_sketch_plane_xy()
-        clear_all_sketch_curves()
-        outer_curves = sketch_wrap_loop_with_drains(t_overwrap)
-        overwrap_outer = extrude_from_explicit_curves("Overwrap_outer_tmp", L_extrude, outer_curves)
-    if overwrap_inner is None:
-        set_sketch_plane_xy()
-        clear_all_sketch_curves()
-        inner_curves = sketch_wrap_loop_with_drains(0)
-        overwrap_inner = extrude_from_explicit_curves("Overwrap_inner_tmp", L_extrude, inner_curves)
-
-    options = MakeSolidsOptions()
-    options.SubtractFromTarget = True
-
-    Combine.Intersect(
-        BodySelection.Create([overwrap_outer]),
-        BodySelection.Create([overwrap_inner]),
-        options
-    )
-
-    try:
-        Delete.Execute(BodySelection.Create([overwrap_inner]))
-    except:
-        pass
-
-    overwrap = find_body_by_name("Overwrap_outer_tmp")
     if overwrap is None:
-        overwrap = overwrap_outer
+        overwrap_outer = find_body_by_name("Overwrap_outer_tmp")
+        
+        if overwrap_outer is None:
+            set_sketch_plane_xy()
+            clear_all_sketch_curves()
+            outer_curves = sketch_wrap_loop_with_drains(t_overwrap)
+            overwrap_outer = extrude_from_explicit_curves("Overwrap_outer_tmp", L_extrude, outer_curves)
+        
+        overwrap_inner = find_body_by_name("Overwrap_inner_tmp")
+        if overwrap_inner is None:
+            set_sketch_plane_xy()
+            clear_all_sketch_curves()
+            inner_curves = sketch_wrap_loop_with_drains(0)
+            overwrap_inner = extrude_from_explicit_curves("Overwrap_inner_tmp", L_extrude, inner_curves)
 
-    try:
+        options = MakeSolidsOptions()
+        options.SubtractFromTarget = True
+
+        Combine.Intersect(
+            BodySelection.Create([overwrap_outer]),
+            BodySelection.Create([overwrap_inner]),
+            options
+        )
+
+        try:
+            live_inner = find_body_by_name("Overwrap_inner_tmp")
+            if live_inner is not None:
+                Delete.Execute(BodySelection.Create([live_inner]))
+        except:
+            pass
+
+        overwrap = find_body_by_name("Overwrap_outer_tmp")
+        if overwrap is None:
+            overwrap = overwrap_outer
+
+        if overwrap is None:
+            raise Exception("Could not refetch final Overwrap body after boolean.")
+
         overwrap.SetName("Overwrap")
-    except:
-        pass
 else:
     # 1. Create the Outer Solid for Overwrap
     overwrap = find_body_by_name("Overwrap")
@@ -1976,56 +1472,6 @@ def _comp_by_name(name):
             if getattr(c, "Name", "") == name:
                 return c
     return None
-
-
-def body_volume_mm3(body):
-    """
-    Returns volume in mm^3 if possible. If the API returns internal units,
-    the value is still consistent for 'near zero' detection.
-    """
-
-    # --- Attempt 1: MassProperties on body (some versions expose this directly)
-    try:
-        mp = body.MassProperties
-        v = float(mp.Volume)
-        return v
-    except:
-        pass
-
-    # --- Attempt 2: GetVolume / Volume property on body
-    for attr in ["GetVolume", "Volume"]:
-        try:
-            v = getattr(body, attr)
-            if callable(v):
-                v = v()
-            v = float(v)
-            return v
-        except:
-            pass
-
-    # --- Attempt 3: Mass properties via a Selection (common pattern)
-    # Different builds expose different helpers; try a couple names.
-    sel = BodySelection.Create([body])
-
-    # 3a) MeasureHelper.GetMassProperties(...)
-    try:
-        mp = MeasureHelper.GetMassProperties(sel)
-        v = float(mp.Volume)
-        return v
-    except:
-        pass
-
-    # 3b) MassProperties.Create(...) or similar
-    try:
-        mp = MassProperties.Create(sel)
-        v = float(mp.Volume)
-        return v
-    except:
-        pass
-
-    # If all fail, return None (we'll report it)
-    return None
-
 
 def move_all_root_bodies_to_component(comp_name):
 
