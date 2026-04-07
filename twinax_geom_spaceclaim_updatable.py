@@ -1,3 +1,4 @@
+# Python Script, API Version = V252
 
 
 # Python Script, API Version = V252
@@ -1066,35 +1067,54 @@ if not (is_a_doublet):
 
         # Build Core 1
         if core_mode == "separate":
-            clear_all_sketch_curves()  
-            sketch_core_with_lumens(-dx_cond)
-            score1 = extrude_and_name("single_core[1]", L_extrude, True)
-
-            clear_all_sketch_curves() 
-            sketch_core_with_lumens(dx_cond)
-            score2 = extrude_and_name("single_core[2]", L_extrude, True)
+            
+            core1 = find_body_by_name("single_core[1]")
+            if core1 is None:
+                set_sketch_plane_xy()
+                clear_all_sketch_curves()  
+                sketch_core_with_lumens(-dx_cond)
+                score1 = extrude_and_name("single_core[1]", L_extrude, True)
+                
+            core2 = find_body_by_name("single_core[2]")
+            if core2 is None:
+                set_sketch_plane_xy()
+                clear_all_sketch_curves() 
+                sketch_core_with_lumens(dx_cond)
+                score2 = extrude_and_name("single_core[2]", L_extrude, True)
 
 
         elif core_mode == "merged":
-            # Build BOTH multilumen cores first (left + right), then Boolean-union them
-            core1 = find_body_by_name("single_core[1]")
-            core2 = find_body_by_name("single_core[2]")
-            if (core1 is None) or (core2 is None):
-                set_sketch_plane_xy()
-                clear_all_sketch_curves() 
-                sketch_core_with_lumens(-dx_cond)
-                core1 = extrude_and_name("single_core[1]", L_extrude, True)
-                set_sketch_plane_xy()
-                clear_all_sketch_curves()
-                sketch_core_with_lumens(+dx_cond)
-                core2 = extrude_and_name("single_core[2]", L_extrude, True)
-                #score = extrude_and_name("single_core_merged", L_extrude, True)
-                # Union
+            score = find_body_by_name("single_core_merged")
+            if score is None:
+                core1 = find_body_by_name("single_core[1]")
+                if core1 is None:
+                    set_sketch_plane_xy()
+                    clear_all_sketch_curves() 
+                    sketch_core_with_lumens(-dx_cond)
+                    core1 = extrude_and_name("single_core[1]", L_extrude, True)
                 
-                score = find_body_by_name("single_core_merged")
-                if score is None:
+                core2 = find_body_by_name("single_core[2]")
+                if core2 is None:   
+                    set_sketch_plane_xy()
                     clear_all_sketch_curves()
-                    score = union_bodies("single_core_merged", [core1, core2])
+                    sketch_core_with_lumens(+dx_cond)
+                    core2 = extrude_and_name("single_core[2]", L_extrude, True)
+                    # Union
+                    
+
+                clear_all_sketch_curves()
+                score = union_bodies("single_core_merged", [core1, core2])
+
+                # optional cleanup of originals
+                victims = []
+                for b in [core1, core2]:
+                    if b is not None and b is not score:
+                        victims.append(b)
+                if victims:
+                    try:
+                        Delete.Execute(BodySelection.Create(victims))
+                    except:
+                        pass
 
 
     else:
