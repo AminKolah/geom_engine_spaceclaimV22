@@ -58,6 +58,16 @@ core_mode = "merged" if merge_cores else "separate"
 
 filler_mode = "shell" if filler_opt == 1 else "fill"
 
+# shell mode: always force touching cores
+if filler_mode == "shell":
+    core_overlap = 0.0
+
+if core_overlap < 0:
+    raise Exception(
+        "core_overlap must be >= 0. Negative values would create a real gap between cores which we don't want."
+    )
+
+
 min_overlap_fill = 0.001  # a min overlap
 if filler_mode == "fill" and core_overlap < min_overlap_fill:
         raise Exception(
@@ -129,18 +139,6 @@ def clear_all_sketch_curves():
     except:
         pass
 
-def ClearAllSketchCurves():
-    """
-    Finds all curves in the active design that are not yet part of a 3D solid 
-    and deletes them to provide a clean slate for the next sketch.
-    """
-    root = GetRootPart()
-    # Collect all curves currently in the Part
-    curves = list(root.Curves)
-    if len(curves) > 0:
-        # Create a selection and delete them
-        Delete.Execute(CurveSelection.Create(curves))
-        
 
 def set_sketch_plane_xy():
     ViewHelper.SetSketchPlane(Plane.PlaneXY)
@@ -323,6 +321,34 @@ def sketch_profile(dx, R, W_val, H_val):
         return sketch_doubleD(dx, R)
 
 
+def sketch_core_wrap_profile(dx_center, r_wrap):
+    curves = []
+
+    # top line
+    curves.extend(SketchLine.Create(P2(-dx_center,  r_wrap), P2(dx_center,  r_wrap)).CreatedCurves)
+
+    # right arc
+    curves.extend(SketchArc.CreateSweepArc(
+        P2(dx_center, 0.0),
+        P2(dx_center,  r_wrap),
+        P2(dx_center, -r_wrap),
+        True
+    ).CreatedCurves)
+
+    # bottom line
+    curves.extend(SketchLine.Create(P2(dx_center, -r_wrap), P2(-dx_center, -r_wrap)).CreatedCurves)
+
+    # left arc
+    curves.extend(SketchArc.CreateSweepArc(
+        P2(-dx_center, 0.0),
+        P2(-dx_center, -r_wrap),
+        P2(-dx_center,  r_wrap),
+        True
+    ).CreatedCurves)
+
+    return curves
+
+
 def sketch_wrap_loop_with_drains(offset):
     curves = []
 
@@ -390,106 +416,6 @@ def sketch_wrap_loop_with_drains(offset):
 
     return curves
 
-
-
-def sketch_wrap_loop_with_drains_old(offset):
-    
-    if not is_elliptic:
-        d = abs(x_drain - dx_shield) 
-        R, r = R_shield, r_drain
-        theta = math.asin((R - r) / d)
-        Ro, ro = R + offset, r + offset
-        tx_S, ty_S = Ro * math.sin(theta), Ro * math.cos(theta)
-        tx_D, ty_D = ro * math.sin(theta), ro * math.cos(theta)
-        SketchArc.CreateSweepArc(P2(x_drain, 0), P2(x_drain + tx_D, ty_D), P2(x_drain + tx_D, -ty_D), True)
-        SketchArc.CreateSweepArc(P2(-x_drain, 0), P2(-x_drain - tx_D, ty_D), P2(-x_drain - tx_D, -ty_D), False)
-        SketchLine.Create(P2(x_drain + tx_D, ty_D), P2(dx_shield + tx_S, ty_S))
-        SketchLine.Create(P2(x_drain + tx_D, -ty_D), P2(dx_shield + tx_S, -ty_S))
-        SketchLine.Create(P2(-x_drain - tx_D, ty_D), P2(-dx_shield - tx_S, ty_S))
-        SketchLine.Create(P2(-x_drain - tx_D, -ty_D), P2(-dx_shield - tx_S, -ty_S))
-        SketchArc.CreateSweepArc(P2(dx_shield, 0), P2(dx_shield + tx_S, ty_S), P2(dx_shield, Ro), False)
-        SketchArc.CreateSweepArc(P2(dx_shield, 0), P2(dx_shield + tx_S, -ty_S), P2(dx_shield, -Ro), True)
-        SketchArc.CreateSweepArc(P2(-dx_shield, 0), P2(-dx_shield, Ro), P2(-dx_shield - tx_S, ty_S), False)
-        SketchArc.CreateSweepArc(P2(-dx_shield, 0), P2(-dx_shield, -Ro), P2(-dx_shield - tx_S, -ty_S), True)
-        SketchLine.Create(P2(-dx_shield, Ro), P2(dx_shield, Ro))
-        SketchLine.Create(P2(-dx_shield, -Ro), P2(dx_shield, -Ro))
-
-    else:  
-        ro = r_drain + offset
-        # Parameters for the overwrap ellipse
-        Ho = (H_outer / 2.0) + offset
-        Do = (W_outer / 2.0) + offset
-
-        # Calculate rx for the overwrap (using your mixing logic)
-
-        C0_o = Do - Ho
-        xc_o = C0_o + h_mix * Ho
-        rs_o = (Ho**2 + (Do - xc_o) * Do) / (2.0 * Do - xc_o)
-        rx_o = math.sqrt((xc_o * Ho**2) / (xc_o - Do + rs_o))
-
-
-        # 1. Calculate the 'Shoulder' of the drain where the line will land
-
-        # We want a line tangent to both the ellipse and the circle.
-
-        # A good approximation for the 'breakaway' angle theta:
-
-        d = abs(x_drain) # Distance to drain center
-
-        # Theta is the angle of the tangent line
-
-        theta = math.asin((Ho - ro) / d) 
-
-        # 2. Tangent point on the Circle (Drain)
-
-        tx_D = ro * math.sin(theta)
-        ty_D = ro * math.cos(theta)
-
-        # 3. Tangent point on the Ellipse
-
-        # For a slope m = -tan(theta), the tangent x on an ellipse is:
-
-        # x = (a^2 * m) / sqrt(a^2 * m^2 + b^2)
-
-        m = math.tan(theta)
-
-        xt = (rx_o**2 * m) / math.sqrt(rx_o**2 * m**2 + Ho**2)
-        yt = Ho * math.sqrt(max(0, 1.0 - (xt**2 / rx_o**2)))
-
-
-        # 4. DRAWING
-        # Drain Arcs (Outer part)
-
-        # Right Drain
-        SketchArc.CreateSweepArc(P2(x_drain, 0), P2(x_drain + tx_D, ty_D), P2(x_drain + tx_D, -ty_D), True)
-
-        # Left Drain
-        SketchArc.CreateSweepArc(P2(-x_drain, 0), P2(-x_drain - tx_D, ty_D), P2(-x_drain - tx_D, -ty_D), False)
-
-    
-        # Tangent Bridge Lines
-
-        # Right side
-
-        SketchLine.Create(P2(x_drain + tx_D, ty_D), P2(xt, yt))
-        SketchLine.Create(P2(x_drain + tx_D, -ty_D), P2(xt, -yt))
-
-        # Left side
-
-        SketchLine.Create(P2(-x_drain - tx_D, ty_D), P2(-xt, yt))
-        SketchLine.Create(P2(-x_drain - tx_D, -ty_D), P2(-xt, -yt))
-
-        
-
-        # 5. Top/Bottom Elliptic Curves (between -xt and xt)
-        n_step = 20
-        xs = [(-xt + (2.0 * xt) * i / float(n_step)) for i in range(n_step + 1)]
-
-        pts_top = [P2(x, Ho * math.sqrt(max(0.0, 1.0 - (x*x)/(rx_o*rx_o)))) for x in xs]
-        pts_bot = [P2(x, -Ho * math.sqrt(max(0.0, 1.0 - (x*x)/(rx_o*rx_o)))) for x in reversed(xs)]
-
-        SketchNurbs.CreateFrom2DPoints(False, pts_top)
-        SketchNurbs.CreateFrom2DPoints(False, pts_bot)
 
 def share_topology_pair(body_a, body_b, mode="share_only", verbose=True):
     """
@@ -1174,16 +1100,20 @@ if not (is_a_doublet):
     else:
 
         if core_mode == "separate":
-            set_sketch_plane_xy()
-            sketch_circle(-dx_cond, 0, r_core)
-            sketch_circle(-dx_cond, 0, r_cond)
-            score1 = extrude_and_name("single_core[1]", L_extrude, True)
+            core1 = find_body_by_name("single_core[1]")
+            if core1 is None:
+                set_sketch_plane_xy()
+                clear_all_sketch_curves()
+                sketch_circle(-dx_cond, 0, r_core)
+                sketch_circle(-dx_cond, 0, r_cond)
+                score1 = extrude_and_name("single_core[1]", L_extrude, True)
 
-
-            set_sketch_plane_xy()
-            sketch_circle(dx_cond, 0, r_core)
-            sketch_circle(dx_cond, 0, r_cond)
-            score2 = extrude_and_name("single_core[2]", L_extrude, True)
+            core2 = find_body_by_name("single_core[2]")
+            if core2 is None:
+                set_sketch_plane_xy()
+                sketch_circle(dx_cond, 0, r_core)
+                sketch_circle(dx_cond, 0, r_cond)
+                score2 = extrude_and_name("single_core[2]", L_extrude, True)
 
 
         elif core_mode == "merged":
@@ -1224,6 +1154,53 @@ if not (is_a_doublet):
 
 # (3) Filler / Doublet
 
+# shell-mode policy: touching cores only
+if filler_mode == "shell":
+    core_overlap = 0.0
+    C2C = D_core
+    dx_cond = 0.5 * D_core
+
+    tol_shell_fit = 1e-6  # or something practical like 0.005 mm
+
+    # Need positive vertical clearance first
+    t_filler_shell = R_in - r_core
+    if t_filler_shell <= tol_shell_fit:
+        raise Exception(
+            "Shell mode impossible: no positive shell thickness available. "
+            "Need R_in > r_core, but got R_in=%.6f mm and r_core=%.6f mm. "
+            "Increase H_outer or reduce D_core/t_shield."
+            % (R_in, r_core)
+        )
+
+    # Need shell outer Double-D to match shield inner Double-D in X as well
+    if abs(dx_cond - dx_in) > tol_shell_fit:
+        # suggested changes:
+        # Want dx_in_target = dx_cond = 0.5*D_core
+        # Since dx_in = (W_in - H_in)/2 and W_in-H_in = W_outer-H_outer,
+        # the condition is W_outer - H_outer = D_core
+        target_diff = D_core
+
+        suggested_W_outer = H_outer + D_core
+        suggested_H_outer = W_outer - D_core
+
+        raise Exception(
+            "Shell mode geometry incompatible with enforced envelope. "
+            "For a true uniform shell around touching cores that also touches the shield at the top, "
+            "you need dx_in = dx_cond. "
+            "Current values: dx_in=%.6f mm, dx_cond=%.6f mm. "
+            "Equivalent requirement: W_outer - H_outer must equal D_core = %.6f mm. "
+            "Current W_outer - H_outer = %.6f mm. "
+            "Suggested fixes: either set W_outer = %.6f mm (keeping H_outer fixed), "
+            "or set H_outer = %.6f mm (keeping W_outer fixed)."
+            % (
+                dx_in, dx_cond,
+                D_core,
+                W_outer - H_outer,
+                suggested_W_outer,
+                suggested_H_outer
+            )
+        )
+
 set_sketch_plane_xy()
 
 if is_a_doublet:
@@ -1232,7 +1209,6 @@ if is_a_doublet:
     sketch_circle(-dx_cond, 0, r_cond)
     sketch_circle(dx_cond, 0, r_cond)
     second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    #create_ns("Second_Extrusion", second_extrusion)
 
 elif filler_mode == "fill":
     
@@ -1243,21 +1219,60 @@ elif filler_mode == "fill":
         sketch_circle(-dx_cond, 0, r_core)
         sketch_circle(dx_cond, 0, r_core)
         second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    #create_ns("Second_Extrusion", second_extrusion)
 
 elif filler_mode == "shell":
 
-    t_filler_shell = (dx_in + R_in) - (dx_cond + r_core)
-    sketch_profile(dx_in, R_in, W_in, H_in)
-    W_fill_inner = W_in - 2.0 * t_filler_shell
-    H_fill_inner = H_in - 2.0 * t_filler_shell
-    R_fill_inner = R_in - t_filler_shell
+    second_extrusion = find_body_by_name("Second_Extrusion")
+    second_extrusion_outer = find_body_by_name("Second_Extrusion_outer_tmp")
+    second_extrusion_inner = find_body_by_name("Second_Extrusion_inner_tmp")
 
-    if H_fill_inner > 0:
-        sketch_profile(dx_in, R_fill_inner, W_fill_inner, H_fill_inner)
+    if second_extrusion is None:
 
-    second_extrusion = extrude_and_name("Second_Extrusion", L_extrude, True)
-    #create_ns("Second_Extrusion", second_extrusion)
+        if second_extrusion_outer is None:
+            set_sketch_plane_xy()
+            clear_all_sketch_curves()
+            outer_curves = sketch_profile(dx_in, R_in, W_in, H_in)
+            second_extrusion_outer = extrude_from_explicit_curves(
+                "Second_Extrusion_outer_tmp",
+                L_extrude,
+                outer_curves
+            )
+
+        if second_extrusion_inner is None:
+            set_sketch_plane_xy()
+            clear_all_sketch_curves()
+            inner_curves = sketch_profile(dx_in, r_core, W_in - 2*t_filler_shell, H_in - 2*t_filler_shell)
+            second_extrusion_inner = extrude_from_explicit_curves(
+                "Second_Extrusion_inner_tmp",
+                L_extrude,
+                inner_curves
+            )
+
+        options = MakeSolidsOptions()
+        options.SubtractFromTarget = True
+
+        Combine.Intersect(
+            BodySelection.Create([second_extrusion_outer]),
+            BodySelection.Create([second_extrusion_inner]),
+            options
+        )
+
+        try:
+            Delete.Execute(BodySelection.Create([second_extrusion_inner]))
+        except:
+            pass
+
+        second_extrusion = find_body_by_name("Second_Extrusion_outer_tmp")
+        if second_extrusion is None:
+            second_extrusion = second_extrusion_outer
+
+        if second_extrusion is None:
+            raise Exception("Could not refetch final Second_Extrusion body after boolean.")
+
+        try:
+            second_extrusion.SetName("Second_Extrusion")
+        except:
+            pass
 
 # (4) Shield
 print("Shield params: W_outer=%.4f H_outer=%.4f dx_shield=%.4f R_shield=%.4f"
@@ -3310,13 +3325,6 @@ def P2(x, y):
 def solidify_sketch():
     ViewHelper.SetViewMode(InteractionMode.Solid)
 
-def set_sketch_plane_yz_at_x(x0):
-    frame = Frame.Create(
-        Point.Create(MM(x0), MM(0), MM(0)),
-        Direction.DirY,
-        Direction.DirZ
-    )
-    ViewHelper.SetSketchPlane(Plane.Create(frame))
 
 def sketch_circle(cu, cv, r):
     # In a YZ sketch, Point2D(x,y) corresponds to (Y,Z).
@@ -3329,15 +3337,7 @@ def pick_planar_face(body):
     # largest planar face is usually correct
     return max(faces, key=lambda f: f.Area)
 
-def angle_360():
-    # robust across builds
-    try:
-        return Angle.Create(2.0 * math.pi)  # radians
-    except:
-        try:
-            return Angle.Degrees(360.0)
-        except:
-            return 360.0
+
 
 def extrude_last_profile_along_x(name, length_mm, pick_largest=True):
     solidify_sketch()
