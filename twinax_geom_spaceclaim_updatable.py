@@ -7,6 +7,9 @@ from SpaceClaim.Api.V252 import *
 from SpaceClaim.Api.V252.Geometry import *
 from SpaceClaim.Api.V252.Modeler import *
 import sys
+import os
+import datetime
+import json
 ClearAll()
 
 # -----------------------------
@@ -14,8 +17,12 @@ ClearAll()
 # -----------------------------
 
 def get_param(name, default_val):
-    try: return float(Parameters[name])
-    except: return default_val
+    try:
+        val = float(Parameters[name])
+    except:
+        val = default_val
+    driving_params[name] = val
+    return val
 
 
 run_benchmark_rig = False  # Set to True to enable 3-point rig creation
@@ -126,6 +133,139 @@ dx_shield = (W_outer - H_outer) / 2.0
 print("Driven C2C = %.6f mm" % C2C)
 print("Driven dx_cond = %.6f mm" % dx_cond)
 
+
+
+
+
+driving_params = {}
+driven_params  = {}
+metadata_params = {}
+
+# -----------------------------
+# CAPTURE DRIVING PARAMETERS
+# -----------------------------
+driving_params.update({
+    # geometry inputs
+    "diam_cond": D_cond,
+    "diam_core": D_core,
+    "core_overlap_input": core_overlap,   # note: may be overridden later for shell
+    "diam_drain": D_drain,
+    "t_shield": t_shield,
+    "t_overwrap": t_overwrap,
+    "W_outer": W_outer,
+    "H_outer": H_outer,
+    "length_extrude": L_extrude,
+
+    # logic / switches
+    "filler_option": filler_opt,
+    "has_drains": drain_opt,
+    "is_a_doublet": is_a_doublet,
+    "is_elliptic": is_elliptic,
+    "mixing_factor": h_mix,
+    "bending_mode_option": bending_benchmark_opt,
+    "merge_cores": merge_cores,
+
+    # multilumen
+    "is_a_multilumen": is_a_multilumen,
+    "multilumen_shape": multilumen_shape_opt,
+    "multilumen_wall_thickness": multilumen_wall_thickness,
+    "n_multilumen_cavity": n_multilumen_cavity,
+})
+
+# -----------------------------
+# CAPTURE DRIVEN PARAMETERS
+# -----------------------------
+driven_params.update({
+    # resolved logic
+    "filler_mode": filler_mode,
+    "core_mode": core_mode,
+    "bending_mode": bending_mode,
+    "multilumen_shape_mode": multilumen_shape_mode,
+
+    # effective overlap after logic
+    "core_overlap_effective": core_overlap,
+
+    # derived radii / spacing
+    "r_cond": r_cond,
+    "r_core": r_core,
+    "r_drain": r_drain,
+    "C2C": C2C,
+    "dx_cond": dx_cond,
+
+    # shield / filler inner geometry
+    "W_in": W_in,
+    "H_in": H_in,
+    "R_in": R_in,
+    "dx_in": dx_in,
+    "R_shield": R_shield,
+    "dx_shield": dx_shield,
+})
+
+# -----------------------------
+# METADATA
+# -----------------------------
+metadata_params.update({
+    "timestamp": str(datetime.datetime.now()),
+    "script_name": "spaceclaim_cable_builder",
+})
+
+def _safe_filename(base_name, ext):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return "{0}_{1}.{2}".format(base_name, timestamp, ext)
+
+def _get_output_dir():
+    # TEMP is usually safest in Windows / IronPython / SpaceClaim
+    out_dir = os.environ.get("TEMP", None)
+    if not out_dir:
+        out_dir = os.path.expanduser("~")
+    return out_dir
+
+def write_single_param_csv(param_dict, filename):
+    try:
+        out_dir = _get_output_dir()
+        path = os.path.join(out_dir, filename)
+
+        with open(path, "w") as f:
+            f.write("Name,Value\n")
+            for k in sorted(param_dict.keys()):
+                f.write("{0},{1}\n".format(k, param_dict[k]))
+
+        print("CSV written to: " + path)
+        return path
+
+    except Exception as e:
+        print("Failed to write CSV '{0}': {1}".format(filename, str(e)))
+        return None
+
+def write_param_json(driving, driven, metadata, filename):
+    try:
+        out_dir = _get_output_dir()
+        path = os.path.join(out_dir, filename)
+
+        payload = {
+            "driving": driving,
+            "driven": driven,
+            "metadata": metadata,
+        }
+
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+
+        print("JSON written to: " + path)
+        return path
+
+    except Exception as e:
+        print("Failed to write JSON '{0}': {1}".format(filename, str(e)))
+        return None
+
+
+driving_csv_name = _safe_filename("driving_params", "csv")
+driven_csv_name  = _safe_filename("driven_params", "csv")
+json_name        = _safe_filename("params_snapshot", "json")
+
+write_single_param_csv(driving_params, driving_csv_name)
+write_single_param_csv(driven_params, driven_csv_name)
+write_param_json(driving_params, driven_params, metadata_params, json_name)
 
 
 # -----------------------------
@@ -2201,8 +2341,6 @@ def create_layer_side_ns_by_normal(layer_body, ns_outer, ns_inner=None,
         _create_named_selection_from_faces(inner_faces, ns_inner)
 
     return outer_faces, inner_faces
-
-
 
 # -----------------------------
 # Parameters (derived defaults)
