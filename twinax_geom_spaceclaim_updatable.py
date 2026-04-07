@@ -1,4 +1,5 @@
 
+
 # Python Script, API Version = V252
 import math
 from SpaceClaim.Api.V252 import *
@@ -27,9 +28,8 @@ is_a_doublet = int(Parameters.is_a_doublet) if hasattr(Parameters, 'is_a_doublet
 is_elliptic  = int(Parameters.is_elliptic) if hasattr(Parameters, 'is_elliptic') else 1
 h_mix        = float(Parameters.mixing_factor) if hasattr(Parameters, 'mixing_factor') else 0.7
 bending_benchmark_opt = int(Parameters.bending_mode_option) if hasattr(Parameters, 'bending_mode_option') else 0
-# filler_mode logic
 
-filler_mode = "shell" if filler_opt == 1 else "fill"
+
 
 if bending_benchmark_opt == 0:
     bending_mode = "good_3point"
@@ -45,8 +45,25 @@ else:
 # Conductor and Core
 
 D_cond = float(Parameters.diam_cond) if hasattr(Parameters, 'diam_cond') else 1.0
-C2C    = float(Parameters.c2c) if hasattr(Parameters, 'c2c') else 3.0
+core_overlap = float(Parameters.core_overlap) if hasattr(Parameters, 'core_overlap') else 0.01
+if core_overlap < 0:
+    raise Exception("core_overlap must be >= 0. Negative values would create a real gap between cores which we don't want.")
 D_core = float(Parameters.diam_core) if hasattr(Parameters, 'diam_core') else 2.8
+# representation choice only
+merge_cores = int(Parameters.merge_cores) if hasattr(Parameters, 'merge_cores') else 0
+core_mode = "merged" if merge_cores else "separate"
+
+
+# filler_mode logic
+
+filler_mode = "shell" if filler_opt == 1 else "fill"
+
+min_overlap_fill = 0.001  # a min overlap
+if filler_mode == "fill" and core_overlap < min_overlap_fill:
+        raise Exception(
+        "For filled second extrusion, cores need a positive overlap to avoid zero-thickness filler geometry. "
+        "Got core_overlap=%.6f mm." % core_overlap)
+
 
 # Shield (Double-D)
 
@@ -82,7 +99,8 @@ multilumen_shape_mode = "trapezoidal" if multilumen_shape_opt == 1 else "circula
 # Derived values
 
 r_cond, r_core, r_drain = D_cond/2.0, D_core/2.0, D_drain/2.0
-
+C2C = D_core - core_overlap
+dx_cond = 0.5 * C2C
 
 # Shield inner dimensions
 
@@ -94,25 +112,11 @@ R_shield = H_outer / 2.0
 dx_shield = (W_outer - H_outer) / 2.0
 
 
-## Take care of the tangency situation between the two cores
-overlap_tol = 0.012  # mm
+print("Driven C2C = %.6f mm" % C2C)
+print("Driven dx_cond = %.6f mm" % dx_cond)
 
-# Geometry relationship between conductor spacing and core size
 
-if (filler_mode == "shell"): 
-    D_core = C2C
-    core_mode = "spaced"
-elif (filler_mode == "fill"):
-    delta = C2C - D_core
-    # snap away from zero-thickness tangency
-    if abs(delta) < overlap_tol:
-        # choose one:
-        # C2C = D_core + overlap_tol            # Policy A (always spaced)
-        C2C = D_core + overlap_tol if delta > 0 else D_core - overlap_tol  # Policy B
-        delta = C2C - D_core
 
-    core_mode = "spaced" if delta > 0 else "merged" 
-dx_cond = C2C / 2.0
 # -----------------------------
 # 2. HELPER FUNCTIONS
 # -----------------------------
@@ -1135,7 +1139,7 @@ if not (is_a_doublet):
                         SketchLine.Create(p4, p1)                              # Side Wall 2
 
         # Build Core 1
-        if core_mode == "spaced":
+        if core_mode == "separate":
             clear_all_sketch_curves()  
             sketch_core_with_lumens(-dx_cond)
             score1 = extrude_and_name("single_core[1]", L_extrude, True)
@@ -1165,16 +1169,11 @@ if not (is_a_doublet):
                 if score is None:
                     clear_all_sketch_curves()
                     score = union_bodies("single_core_merged", [core1, core2])
-                    core1, core2 = split_by_yz_plane_face(
-                        score,
-                        x_cut=0.0,
-                        left_name="single_core[1]",
-                        right_name="single_core[2]"
-                    )
+
 
     else:
 
-        if core_mode == "spaced":
+        if core_mode == "separate":
             set_sketch_plane_xy()
             sketch_circle(-dx_cond, 0, r_core)
             sketch_circle(-dx_cond, 0, r_cond)
@@ -1189,33 +1188,38 @@ if not (is_a_doublet):
 
         elif core_mode == "merged":
             # Create both overlapping single core bodies first
-            core1 = find_body_by_name("single_core[1]")
-            core2 = find_body_by_name("single_core[2]")
-            if (core1 is None) or (core2 is None):
-                set_sketch_plane_xy()
-                clear_all_sketch_curves()
-                sketch_circle(-dx_cond, 0, r_core)
-                sketch_circle(-dx_cond, 0, r_cond)
-                core1 = extrude_and_name("single_core[1]", L_extrude, True)
-                set_sketch_plane_xy()
-                clear_all_sketch_curves()
-                sketch_circle(dx_cond, 0, r_core)
-                sketch_circle(dx_cond, 0, r_cond)
-                core2 = extrude_and_name("single_core[2]", L_extrude, True)
-                # Perform Boolean Merge (Union)
-                score = find_body_by_name("single_core_merged")
-                if score is None:
+            score = find_body_by_name("single_core_merged")
+            if score is None:
+                core1 = find_body_by_name("single_core[1]")
+                core2 = find_body_by_name("single_core[2]")
+
+                if core1 is None:
+                    set_sketch_plane_xy()
                     clear_all_sketch_curves()
-                    score = union_bodies("single_core_merged", [core1, core2])
-                    core1, core2 = split_by_yz_plane_face(
-                        score,
-                        x_cut=0.0,
-                        left_name="single_core[1]",
-                        right_name="single_core[2]"
-                    )
-                # Assign final name and NS
-                #merged_result.SetName("single_core_merged")
-                #create_ns("single_core_merged", merged_result)
+                    sketch_circle(-dx_cond, 0, r_core)
+                    sketch_circle(-dx_cond, 0, r_cond)
+                    core1 = extrude_and_name("single_core[1]", L_extrude, True)
+
+                if core2 is None:
+                    set_sketch_plane_xy()
+                    clear_all_sketch_curves()
+                    sketch_circle(dx_cond, 0, r_core)
+                    sketch_circle(dx_cond, 0, r_cond)
+                    core2 = extrude_and_name("single_core[2]", L_extrude, True)
+
+                clear_all_sketch_curves()
+                score = union_bodies("single_core_merged", [core1, core2])
+
+                # optional cleanup of originals
+                victims = []
+                for b in [core1, core2]:
+                    if b is not None and b is not score:
+                        victims.append(b)
+                if victims:
+                    try:
+                        Delete.Execute(BodySelection.Create(victims))
+                    except:
+                        pass
             
 
 # (3) Filler / Doublet
@@ -1721,8 +1725,11 @@ def extrude_largest_face_along_z(name, length_mm):
 # --- NOW create Named Selections (last) ---
 create_ns("conductor[1]", find_body_anywhere_by_name("conductor[1]")[0])
 create_ns("conductor[2]", find_body_anywhere_by_name("conductor[2]")[0])
-create_ns("single_core[1]", find_body_anywhere_by_name("single_core[1]")[0])
-create_ns("single_core[2]", find_body_anywhere_by_name("single_core[2]")[0])
+if core_mode == "separate":
+    create_ns("single_core[1]", find_body_anywhere_by_name("single_core[1]")[0])
+    create_ns("single_core[2]", find_body_anywhere_by_name("single_core[2]")[0])
+else:
+    create_ns("single_core_merged", find_body_anywhere_by_name("single_core_merged")[0])
 create_ns("Second_Extrusion", find_body_anywhere_by_name("Second_Extrusion")[0])
 create_ns("Shield", find_body_anywhere_by_name("Shield")[0])
 if drain_opt:
@@ -3107,7 +3114,7 @@ def section_props_from_face_polygon(face, samples_per_edge=30):
 
 def calculate_explicit_composite_stiffness(modulus_map):
     target_names = ["conductor[1]", "conductor[2]", "Shield", "Overwrap", "Second_Extrusion"]
-    if core_mode == "spaced":
+    if core_mode == "separate":
         target_names += ["single_core[1]", "single_core[2]"]
     else:
         target_names += ["single_core_merged"]
@@ -3216,7 +3223,7 @@ def get_polygon_props(face):
 
 def calculate_explicit_composite_stiffness_v2(modulus_map):
     target_names = ["conductor[1]", "conductor[2]", "Shield", "Overwrap", "Second_Extrusion"]
-    if core_mode == "spaced":
+    if core_mode == "separate":
         target_names += ["single_core[1]", "single_core[2]"]
     else:
         target_names += ["single_core_merged"]
@@ -3515,4 +3522,3 @@ if run_benchmark_rig:
         # Optional: named selections for supports if you want
     # create_ns(_body_name(s1), s1)
     # create_ns(_body_name(s2), s2)
-    # Python Script, API Version = V252
