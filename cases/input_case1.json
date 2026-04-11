@@ -1,0 +1,46 @@
+{
+  "driven": {
+    "C2C": 0.58420000000000005, 
+    "H_in": 0.91459999999999997, 
+    "R_in": 0.45729999999999998, 
+    "R_shield": 0.49914999999999998, 
+    "W_in": 1.4988000000000001, 
+    "bending_mode": "good_2pulleys", 
+    "core_mode": "separate", 
+    "core_overlap_effective": 0.0, 
+    "dx_cond": 0.29210000000000003, 
+    "dx_in": 0.29210000000000008, 
+    "dx_shield": 0.29210000000000003, 
+    "filler_mode": "shell", 
+    "multilumen_shape_mode": "circular", 
+    "r_cond": 0.13350000000000001, 
+    "r_core": 0.29210000000000003, 
+    "r_drain": 0.10000000000000001
+  }, 
+  "driving": {
+    "H_outer": 0.99829999999999997, 
+    "W_outer": 1.5825, 
+    "bending_mode_option": 2, 
+    "core_overlap_input": 0.0, 
+    "diam_cond": 0.26700000000000002, 
+    "diam_core": 0.58420000000000005, 
+    "diam_drain": 0.20000000000000001, 
+    "filler_option": 1, 
+    "has_drains": 1, 
+    "is_a_doublet": 0, 
+    "is_a_multilumen": 1, 
+    "is_elliptic": 0, 
+    "length_extrude": 20.0, 
+    "merge_cores": 0, 
+    "mixing_factor": 0.5, 
+    "multilumen_shape": 1, 
+    "multilumen_wall_thickness": 0.040000000000000001, 
+    "n_multilumen_cavity": 5, 
+    "t_overwrap": 0.024, 
+    "t_shield": 0.041849999999999998
+  }, 
+  "metadata": {
+    "script_name": "spaceclaim_cable_builder", 
+    "timestamp": "2026-04-07 15:48:01.536000"
+  }
+}
